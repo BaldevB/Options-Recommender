@@ -1,13 +1,13 @@
 """Price data fetching, quote normalization, caching, and earnings calendar checks using yfinance."""
 
-from datetime import datetime, date, timedelta, timezone
+from datetime import datetime, date, timezone
 import logging
 import time
 from typing import Dict, Any, Optional, List, Tuple
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from config import DEFAULT_CONFIG, INDEX_PRODUCTS
+from config import DEFAULT_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -365,173 +365,6 @@ def get_earnings_info(
     return result
 
 
-def get_dividend_info(
-    symbol: str,
-    blackout_days: int = 3,
-    warning_days: int = 7
-) -> Dict[str, Any]:
-    """Retrieve upcoming ex-dividend date to protect against early assignment and price drop.
-
-    Returns:
-        Dict with 'next_ex_dividend_date', 'days_to_dividend', 'is_dividend_risk', 'status_message'.
-    """
-    symbol = symbol.strip().upper()
-    cache_key = f"dividend_{symbol}"
-    cached = _get_from_cache(cache_key)
-    if cached is not None:
-        return cached.copy()
-
-    result: Dict[str, Any] = {
-        "next_ex_dividend_date": None,
-        "days_to_dividend": None,
-        "is_dividend_risk": False,
-        "status_message": "No imminent ex-dividend date detected.",
-    }
-
-    try:
-        ticker = yf.Ticker(symbol)
-        today = date.today()
-        upcoming = []
-
-        # Check calendar for Ex-Dividend Date
-        cal = getattr(ticker, "calendar", None)
-        if isinstance(cal, dict) and "Ex-Dividend Date" in cal:
-            ex_val = cal["Ex-Dividend Date"]
-            if isinstance(ex_val, (date, datetime)):
-                d = ex_val.date() if isinstance(ex_val, datetime) else ex_val
-                if d >= today:
-                    upcoming.append(d)
-
-        # Check fast_info or info
-        if not upcoming:
-            info = getattr(ticker, "info", {})
-            if isinstance(info, dict) and "exDividendDate" in info:
-                ts = info["exDividendDate"]
-                if ts and isinstance(ts, (int, float)):
-                    d = datetime.fromtimestamp(ts, tz=timezone.utc).date()
-                    if d >= today:
-                        upcoming.append(d)
-
-        if upcoming:
-            upcoming.sort()
-            next_div = upcoming[0]
-            days_away = (next_div - today).days
-            result["next_ex_dividend_date"] = next_div.strftime("%Y-%m-%d")
-            result["days_to_dividend"] = days_away
-
-            if days_away <= blackout_days:
-                result["is_dividend_risk"] = True
-                result["status_message"] = (
-                    f"[EX-DIVIDEND WARNING] Ex-dividend date in {days_away} day(s) ({result['next_ex_dividend_date']}). "
-                    f"Short call early assignment risk and underlying dividend gap down risk."
-                )
-            elif days_away <= warning_days:
-                result["status_message"] = (
-                    f"Ex-dividend date approaching in {days_away} days ({result['next_ex_dividend_date']})."
-                )
-
-        _set_in_cache(cache_key, result)
-    except Exception as exc:
-        logger.debug("Could not retrieve dividend info for %s: %s", symbol, exc)
-
-    return result
-
-
-def get_macro_event_info(symbol: str) -> Dict[str, Any]:
-    """Check macro event schedule (FOMC rate decision, CPI release) for broad index products.
-
-    Index ETFs (SPY, QQQ, IWM, DIA) are strongly impacted by binary macro announcements.
-    """
-    symbol = symbol.strip().upper()
-    is_index = symbol in INDEX_PRODUCTS
-
-    today = date.today()
-
-    # Recurring macro calendar dates (FOMC announcements & CPI releases)
-    # Modeled schedule for 2026/2027 macroeconomic calendar
-    macro_schedule = [
-        # Modeled upcoming FOMC/CPI dates for current/upcoming cycles
-        {"event": "CPI Release (Inflation Print)", "date": date(2026, 10, 14), "type": "CPI"},
-        {"event": "FOMC Rate Decision", "date": date(2026, 11, 4), "type": "FOMC"},
-        {"event": "CPI Release (Inflation Print)", "date": date(2026, 11, 12), "type": "CPI"},
-        {"event": "FOMC Rate Decision", "date": date(2026, 12, 16), "type": "FOMC"},
-        {"event": "CPI Release (Inflation Print)", "date": date(2026, 12, 11), "type": "CPI"},
-        {"event": "FOMC Rate Decision", "date": date(2027, 1, 27), "type": "FOMC"},
-    ]
-
-    upcoming_macro = [m for m in macro_schedule if m["date"] >= today]
-    upcoming_macro.sort(key=lambda x: x["date"])
-
-    if not is_index or not upcoming_macro:
-        return {
-            "is_index_product": is_index,
-            "next_macro_event": None,
-            "days_to_macro_event": None,
-            "is_macro_risk": False,
-            "status_message": "Single equity product (specific idiosyncratic earnings/sentiment applies)."
-        }
-
-    next_ev = upcoming_macro[0]
-    days_to_macro = (next_ev["date"] - today).days
-
-    is_risk = (days_to_macro <= 2)
-
-    return {
-        "is_index_product": True,
-        "next_macro_event": next_ev["event"],
-        "macro_date": next_ev["date"].strftime("%Y-%m-%d"),
-        "days_to_macro_event": days_to_macro,
-        "is_macro_risk": is_risk,
-        "status_message": (
-            f"[MACRO EVENT ALERT] {next_ev['event']} in {days_to_macro} day(s) ({next_ev['date'].strftime('%Y-%m-%d')}). "
-            f"Elevated implied volatility and binary market gap risk across index products."
-            if is_risk else
-            f"Next key macro event: {next_ev['event']} in {days_to_macro} days."
-        )
-    }
-
-
-def get_event_risk_profile(symbol: str) -> Dict[str, Any]:
-    """Synthesize complete institutional event risk profile (Earnings, Dividends, Macro)."""
-    earnings = get_earnings_info(symbol)
-    dividends = get_dividend_info(symbol)
-    macro = get_macro_event_info(symbol)
-
-    has_event_soon = (
-        earnings.get("is_blackout", False) or
-        earnings.get("is_warning", False) or
-        dividends.get("is_dividend_risk", False) or
-        macro.get("is_macro_risk", False)
-    )
-
-    reasons = []
-    if earnings.get("is_blackout"):
-        reasons.append(f"Earnings Blackout ({earnings.get('days_to_earnings')}d)")
-    elif earnings.get("is_warning"):
-        reasons.append(f"Earnings Approaching ({earnings.get('days_to_earnings')}d)")
-
-    if dividends.get("is_dividend_risk"):
-        reasons.append(f"Ex-Dividend ({dividends.get('days_to_dividend')}d)")
-
-    if macro.get("is_macro_risk"):
-        reasons.append(f"Macro {macro.get('next_macro_event')} ({macro.get('days_to_macro_event')}d)")
-
-    return {
-        "symbol": symbol,
-        "has_event_soon": has_event_soon,
-        "reasons": reasons,
-        "earnings": earnings,
-        "dividends": dividends,
-        "macro": macro,
-        "recommend_spread_over_single_leg": has_event_soon,
-        "is_index_product": macro.get("is_index_product", False),
-        "has_macro_event": macro.get("next_macro_event") is not None,
-        "macro_event_name": macro.get("next_macro_event") or "None",
-        "has_dividend_event": dividends.get("next_ex_dividend_date") is not None,
-        "event_warnings": reasons,
-    }
-
-
 RIBBON_BENCHMARKS: List[Dict[str, str]] = [
     {"symbol": "SPY", "name": "S&P 500"},
     {"symbol": "QQQ", "name": "Nasdaq 100"},
@@ -550,6 +383,7 @@ def get_market_session_status() -> Dict[str, Any]:
         import zoneinfo
         now_et = datetime.now(zoneinfo.ZoneInfo("America/New_York"))
     except Exception:
+        from datetime import timedelta
         now_et = datetime.now(timezone(timedelta(hours=-4)))
 
     weekday = now_et.weekday()  # 0 = Mon, 6 = Sun

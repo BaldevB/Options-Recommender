@@ -5,18 +5,14 @@ Provides REST endpoints for Next.js frontend:
 - Historical OHLCV candlestick bars with SMA overlays formatted for TradingView Lightweight Charts
 - Quantitative momentum, recency sentiment & trade signals
 - Delta-targeted (0.30-0.55) options recommendations & institutional trade plans
-- Conservative net expectancy ranking (modeling entry at ask, exit at bid, commissions & slippage)
-- Hard affordability rule & opt-in uncapped speculative sizing guardrails
-- Event-aware risk profiling (macro index events, ex-dividend dates, earnings blackout)
-- Gated 0DTE High-Velocity Flash Lab with market hours entry cutoff and FINRA settlement risk warnings
-- Walk-Forward Backtesting Engine validating selection rules against ATM & fixed-delta baselines
+- Commodities universe scanner (Precious Metals, Energy, Industrial Metals, Agriculture, Uranium)
+- High-confidence AI ecosystem scanner (Chips, NeoClouds, Opticals, Memory, Software, Infra)
+- High-Risk & Asymmetric Speculative setups screener (Moonshots, Lotto Spreads, Crypto-Beta) with Uncapped Sizing
+- 0DTE High-Velocity Flash Lab with intraday Black-Scholes Greeks and theta burn rates
 """
 
-from dataclasses import asdict
 from datetime import datetime, date
-import json
 import logging
-import os
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,33 +20,26 @@ import numpy as np
 import pandas as pd
 
 from config import (
-    AppConfig, RiskManagementConfig, DEFAULT_CONFIG, WATCHLIST_CATEGORIES, EXPANDED_WATCHLIST,
+    AppConfig, DEFAULT_CONFIG, WATCHLIST_CATEGORIES, EXPANDED_WATCHLIST,
     COMMODITIES_CATEGORIES, COMMODITIES_UNIVERSE,
     AI_STOCKS_CATEGORIES, AI_STOCKS_UNIVERSE,
     HIGH_RISK_CATEGORIES, HIGH_RISK_UNIVERSE, ZERO_DTE_UNIVERSE
 )
-from data.price_data import (
-    get_price_history, get_current_quote, get_earnings_info, get_candles_data,
-    get_event_risk_profile, DEFAULT_TIMEFRAME_PERIODS
-)
+from data.price_data import get_price_history, get_current_quote, get_earnings_info, get_candles_data, DEFAULT_TIMEFRAME_PERIODS
 from data.news_data import get_company_news
 from data.options_data import get_options_chains, get_options_chain_matrix
 from analysis.momentum import analyze_momentum
 from analysis.sentiment import analyze_news_sentiment
 from analysis.signals import generate_signal, BiasDirection, ConfidenceTier, TradeSignal
-from analysis.backtesting import WalkForwardBacktestEngine, WalkForwardValidationResult, save_validation_results
-from options.suggester import (
-    suggest_options, build_zero_dte_setup, ZeroDteTradeSetup,
-    calculate_black_scholes_greeks, compute_position_sizing
-)
+from options.suggester import suggest_options, build_zero_dte_setup, ZeroDteTradeSetup, calculate_black_scholes_greeks, compute_position_sizing
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Options Suggester API",
-    description="Institutional Options Engine with Net Expectancy Ranking, Hard Affordability, Event Risk Profiling, Gated 0DTE, and Walk-Forward Backtesting",
-    version="2.4.0"
+    description="Quantitative Options Signal Engine with Delta Targeting, Commodities Universe, AI Sectors, and Uncapped High-Risk Speculative Setups",
+    version="2.3.0"
 )
 
 # Enable CORS for Next.js frontend and any local origins
@@ -128,15 +117,10 @@ def format_trade_plan_dict(tp: Any) -> Optional[Dict[str, Any]]:
         "metrics": {
             "pop_pct": getattr(tp, "probability_of_profit_pct", 50.0),
             "probability_of_profit_pct": getattr(tp, "probability_of_profit_pct", 50.0),
-            "model_implied_probability_pct": getattr(tp, "model_implied_probability_pct", 50.0),
             "risk_reward_ratio": getattr(tp, "risk_reward_ratio", 2.0),
             "expected_value": getattr(tp, "expected_value_per_contract", 0.0),
             "expected_value_per_contract": getattr(tp, "expected_value_per_contract", 0.0),
-            "net_expectancy": getattr(tp, "net_expectancy", 0.0),
-            "round_trip_friction": getattr(tp, "round_trip_friction", 0.0),
-            "quote_quality": getattr(tp, "quote_quality", "indicative—verify in broker chain"),
         },
-        "scenario_outcomes": getattr(tp, "scenario_outcomes", []),
         "playbook_steps": getattr(tp, "playbook_steps", []),
         "ratchet_ladder": getattr(tp, "ratchet_ladder", []),
         "rolling_playbook": getattr(tp, "rolling_playbook", {}),
@@ -164,6 +148,7 @@ def get_universe():
         "high_risk_universe": HIGH_RISK_UNIVERSE,
         "zero_dte_universe": ZERO_DTE_UNIVERSE,
     })
+
 
 
 @app.get("/api/candles")
@@ -195,24 +180,15 @@ def get_stock_analysis(
     risk_pct: float = 1.0,
     min_dte: int = 14,
     max_dte: int = 45,
-    allow_unaffordable: bool = False,
-    allow_uncapped: bool = False,
-    max_contracts_cap: int = 50,
-    max_daily_loss: float = 500.0,
 ):
-    """Complete deep dive for a single stock with conservative net expectancy and hard affordability."""
+    """Complete deep dive for a single stock: chart data, momentum, sentiment, signal, options, and high-risk setup."""
     ticker = ticker.strip().upper()
     cfg = AppConfig()
     cfg.history_period = period
     cfg.risk.account_equity = float(equity)
     cfg.risk.max_risk_pct = float(risk_pct) / 100.0
-    cfg.risk.allow_unaffordable = bool(allow_unaffordable)
-    cfg.risk.allow_uncapped_speculative = bool(allow_uncapped)
-    cfg.risk.max_contracts_cap = int(max_contracts_cap)
-    cfg.risk.max_daily_loss_budget = float(max_daily_loss)
     cfg.options_filter.min_dte = int(min_dte)
     cfg.options_filter.max_dte = int(max_dte)
-    cfg.high_risk_filter.allow_uncapped = bool(allow_uncapped)
 
     quote = get_current_quote(ticker)
     if not quote["valid"]:
@@ -222,21 +198,20 @@ def get_stock_analysis(
     if hist is None or hist.empty:
         raise HTTPException(status_code=500, detail=f"Could not retrieve historical data for: {ticker}")
 
+    # Fetch formatted candlestick bars with indicators and VWAP
     candles = get_candles_data(ticker, interval=interval, period=period)
-    earnings_info = get_earnings_info(ticker, cfg.earnings.blackout_days, cfg.earnings.warning_days)
-    event_profile = get_event_risk_profile(ticker)
 
+    earnings_info = get_earnings_info(ticker, cfg.earnings.blackout_days, cfg.earnings.warning_days)
     momentum = analyze_momentum(hist, ticker, cfg.technicals)
     news_articles = get_company_news(ticker, limit=cfg.news_limit)
     sentiment = analyze_news_sentiment(news_articles, ticker)
     signal = generate_signal(momentum, sentiment, earnings_info, cfg.weights, cfg.earnings)
 
-    # Options chain screening with hard affordability and conservative EV
+    # Options chain screening (disciplined + high-risk asymmetric)
     calls_df, puts_df, _ = get_options_chains(ticker, cfg.options_filter.min_dte, cfg.options_filter.max_dte)
     screening = suggest_options(
         signal, quote["current_price"], calls_df, puts_df,
-        cfg.options_filter, cfg.risk, cfg.high_risk_filter,
-        event_profile=event_profile
+        cfg.options_filter, cfg.risk, cfg.high_risk_filter
     )
 
     hr = screening.high_risk_setup
@@ -259,8 +234,6 @@ def get_stock_analysis(
             "upside_leverage": hr.upside_leverage,
             "suggested_contracts": hr.suggested_contracts,
             "total_dollar_risk": hr.total_dollar_risk,
-            "is_uncapped": hr.is_uncapped,
-            "quote_quality": hr.quote_quality,
             "lotto_spread": {
                 "type": ls.spread_type,
                 "expiration": ls.expiration,
@@ -271,7 +244,6 @@ def get_stock_analysis(
                 "max_profit": ls.max_profit_per_contract,
                 "risk_reward_ratio": ls.risk_reward_ratio,
                 "notes": ls.spread_notes,
-                "quote_quality": ls.quote_quality,
                 "trade_plan": ls.trade_plan,
             } if ls else None,
             "warnings": hr.risk_warnings,
@@ -283,8 +255,6 @@ def get_stock_analysis(
         "quote": quote,
         "candles": candles,
         "earnings": earnings_info,
-        "event_risk_profile": event_profile,
-        "rejection_reason": screening.rejection_reason,
         "momentum": {
             "score": momentum.momentum_score,
             "trend_desc": momentum.trend_description,
@@ -333,7 +303,6 @@ def get_stock_analysis(
                     "bid": s.bid,
                     "ask": s.ask,
                     "mid": s.mid_price,
-                    "spread": s.spread,
                     "spread_pct": s.spread_pct_of_mid,
                     "volume": s.volume,
                     "open_interest": s.open_interest,
@@ -344,12 +313,6 @@ def get_stock_analysis(
                     "total_dollar_risk": s.total_dollar_risk,
                     "stop_loss_price": s.suggested_stop_loss_price,
                     "stop_loss_dollar": s.stop_loss_dollar_risk,
-                    "net_expectancy": getattr(s, "net_expectancy", 0.0),
-                    "round_trip_cost": getattr(s, "round_trip_cost", 0.0),
-                    "model_implied_prob_pct": getattr(s, "model_implied_prob_pct", 50.0),
-                    "quote_quality": getattr(s, "quote_quality", "indicative—verify in broker chain"),
-                    "is_indicative": getattr(s, "is_indicative", True),
-                    "scenario_matrix": getattr(s, "scenario_matrix", {}),
                     "rank_score": s.rank_score,
                     "warnings": s.risk_warnings,
                     "trade_plan": format_trade_plan_dict(s.trade_plan),
@@ -377,7 +340,6 @@ def get_stock_analysis(
                     "suggested_contracts": spd.suggested_contracts,
                     "total_dollar_risk": spd.total_dollar_risk,
                     "notes": spd.spread_notes,
-                    "quote_quality": getattr(spd, "quote_quality", "indicative—verify in broker chain"),
                     "trade_plan": spd.trade_plan,
                 }
                 for spd in screening.spread_suggestions
@@ -489,10 +451,7 @@ def get_high_confidence_picks(
                         "req_move_pct": best.required_move_pct,
                         "contracts": best.suggested_contracts,
                         "total_risk": best.total_dollar_risk,
-                        "net_expectancy": getattr(best, "net_expectancy", 0.0),
-                        "model_implied_pop": getattr(best, "model_implied_prob_pct", 50.0),
                         "stop_loss": best.suggested_stop_loss_price,
-                        "quote_quality": getattr(best, "quote_quality", "indicative—verify in broker chain"),
                         "trade_plan": format_trade_plan_dict(best.trade_plan),
                     },
                     "debit_spread": {
@@ -502,7 +461,6 @@ def get_high_confidence_picks(
                         "net_debit": spd.net_debit,
                         "max_profit": spd.max_profit_per_contract,
                         "risk_reward_ratio": spd.risk_reward_ratio,
-                        "quote_quality": getattr(spd, "quote_quality", "indicative—verify in broker chain"),
                         "trade_plan": spd.trade_plan,
                     } if spd else None,
                     "high_risk_setup": {
@@ -515,7 +473,6 @@ def get_high_confidence_picks(
                         "ask": hr.ask,
                         "upside_leverage": hr.upside_leverage,
                         "total_dollar_risk": hr.total_dollar_risk,
-                        "quote_quality": hr.quote_quality,
                         "trade_plan": hr.trade_plan,
                     } if hr else None,
                     "rationale": sig.rationale[:4],
@@ -533,20 +490,13 @@ def get_high_risk_setups(
     ticker: Optional[str] = None,
     equity: float = 10000.0,
     risk_pct: float = 1.0,
-    allow_uncapped: bool = False,
-    max_contracts_cap: int = 25,
-    max_daily_loss: float = 500.0,
 ):
-    """Screen for aggressive, asymmetric high-risk trade setups with opt-in uncapped sizing and guardrails."""
+    """Screen for aggressive, asymmetric high-risk trade setups with uncapped sizing based on risk budget."""
     cfg = AppConfig()
     cfg.risk.account_equity = float(equity)
     effective_risk = float(risk_pct) / 100.0
     cfg.risk.max_risk_pct = effective_risk
-    cfg.risk.allow_uncapped_speculative = bool(allow_uncapped)
-    cfg.risk.max_contracts_cap = int(max_contracts_cap)
-    cfg.risk.max_daily_loss_budget = float(max_daily_loss)
     cfg.high_risk_filter.speculative_risk_pct = effective_risk
-    cfg.high_risk_filter.allow_uncapped = bool(allow_uncapped)
 
     if ticker:
         tickers = [ticker.strip().upper()]
@@ -587,6 +537,7 @@ def get_high_risk_setups(
             sig = generate_signal(mom, sent, e_info, cfg.weights, cfg.earnings)
 
             if sig.bias == BiasDirection.NEUTRAL:
+                # Derive directional lean for speculative trade setups
                 sig.bias = BiasDirection.BULLISH if mom.momentum_score >= 50 else BiasDirection.BEARISH
                 if sig.confidence < 0.25:
                     sig.confidence = 0.25
@@ -638,8 +589,6 @@ def get_high_risk_setups(
                     "upside_leverage": hr.upside_leverage,
                     "suggested_contracts": hr.suggested_contracts,
                     "total_dollar_risk": hr.total_dollar_risk,
-                    "is_uncapped": hr.is_uncapped,
-                    "quote_quality": hr.quote_quality,
                     "lotto_spread": {
                         "type": ls.spread_type,
                         "expiration": ls.expiration,
@@ -652,7 +601,6 @@ def get_high_risk_setups(
                         "suggested_contracts": ls.suggested_contracts,
                         "total_dollar_risk": ls.total_dollar_risk,
                         "notes": ls.spread_notes,
-                        "quote_quality": ls.quote_quality,
                         "trade_plan": ls.trade_plan,
                     } if ls else None,
                     "warnings": hr.risk_warnings,
@@ -661,6 +609,7 @@ def get_high_risk_setups(
         except Exception as exc:
             logger.warning("Error screening high risk for %s: %s", sym, exc)
 
+    # Sort by upside leverage ratio descending
     setups.sort(key=lambda x: x["upside_leverage"], reverse=True)
     return sanitize_json({"count": len(setups), "setups": setups})
 
@@ -671,7 +620,7 @@ def get_zero_dte_endpoint(
     equity: float = 10000.0,
     risk_pct: float = 1.0,
 ):
-    """Scan and generate high-velocity 0DTE trade setups with session gating and FINRA pin risk warnings."""
+    """Scan and generate high-velocity 0DTE (same-day / front-session) options trade setups."""
     cfg = AppConfig()
     cfg.risk.account_equity = float(equity)
     effective_risk = float(risk_pct) / 100.0
@@ -696,12 +645,14 @@ def get_zero_dte_endpoint(
             sent = analyze_news_sentiment(articles, sym)
             sig = generate_signal(mom, sent, None, cfg.weights, cfg.earnings)
 
+            # Intraday momentum bias (if neutral, lean towards technical momentum)
             bias = sig.bias
             if bias == BiasDirection.NEUTRAL:
                 bias = BiasDirection.BULLISH if mom.momentum_score >= 50 else BiasDirection.BEARISH
 
             opt_type = "CALL" if bias == BiasDirection.BULLISH else "PUT"
 
+            # Retrieve front-month chain (0 to 1 DTE)
             calls_df, puts_df, exps = get_options_chains(sym, min_dte=0, max_dte=1)
             target_chain = calls_df if opt_type == "CALL" else puts_df
 
@@ -711,6 +662,7 @@ def get_zero_dte_endpoint(
                 symbol=sym, bias_str=bias.value
             )
 
+            # Build comprehensive list of all available 0DTE options for this symbol
             all_opts = []
             exp_target = setup.expiration if setup else (calls_df["expiration"].iloc[0] if not calls_df.empty else (puts_df["expiration"].iloc[0] if not puts_df.empty else None))
             dte_val = setup.dte if setup else (int(calls_df["dte"].iloc[0]) if not calls_df.empty else 0)
@@ -729,12 +681,12 @@ def get_zero_dte_endpoint(
                         spread_p = round((spread_v / mid_v) * 100.0, 1) if mid_v > 0 else 0.0
                         iv_v = float(row.get("impliedVolatility", 0.20))
                         g = calculate_black_scholes_greeks(quote["current_price"], k, dte_val, iv_v, is_call)
-
+                        
                         moneyness = round(((k / quote["current_price"]) - 1.0) * 100.0, 2) if is_call else round(((quote["current_price"] / k) - 1.0) * 100.0, 2)
                         be_v = round(k + ask_v, 2) if is_call else round(k - ask_v, 2)
                         req_m = round(((be_v - quote["current_price"]) / quote["current_price"]) * 100.0, 2) if is_call else round(((quote["current_price"] - be_v) / quote["current_price"]) * 100.0, 2)
-                        contracts_c, total_r, stop_px, _, is_aff = compute_position_sizing(ask_v, cfg.risk, custom_risk_pct=cfg.zero_dte_filter.speculative_risk_pct)
-
+                        contracts_c, total_r, stop_px, _ = compute_position_sizing(ask_v, cfg.risk, custom_risk_pct=cfg.zero_dte_filter.speculative_risk_pct)
+                        
                         all_opts.append({
                             "contract": str(row["contractSymbol"]),
                             "strike": k,
@@ -760,8 +712,6 @@ def get_zero_dte_endpoint(
                             "suggested_contracts": contracts_c,
                             "total_dollar_risk": total_r,
                             "stop_loss_price": stop_px,
-                            "is_affordable": is_aff,
-                            "quote_quality": "indicative—verify in broker chain",
                         })
 
                 all_opts.sort(key=lambda x: (x["strike"], 0 if x["type"] == "CALL" else 1))
@@ -779,12 +729,6 @@ def get_zero_dte_endpoint(
                     "volume_ratio": mom.volume_ratio,
                     "expiration": setup.expiration,
                     "dte": setup.dte,
-                    "is_market_open": setup.is_market_open,
-                    "is_entry_permitted": setup.is_entry_permitted,
-                    "trading_status_message": setup.trading_status_message,
-                    "settlement_type": setup.settlement_type,
-                    "settlement_risk_warning": setup.settlement_risk_warning,
-                    "quote_quality": setup.quote_quality,
                     "scalp_setup": {
                         "contract": setup.scalp_contract,
                         "strike": setup.scalp_strike,
@@ -833,6 +777,7 @@ def get_zero_dte_endpoint(
                     "all_options": all_opts,
                 })
             elif ticker and all_opts:
+                # Custom search ticker: return with full available options chain even if no strict scalp filtered
                 results.append({
                     "symbol": sym,
                     "name": quote.get("name", sym),
@@ -844,12 +789,6 @@ def get_zero_dte_endpoint(
                     "volume_ratio": mom.volume_ratio,
                     "expiration": exp_target or "Front Cycle",
                     "dte": dte_val,
-                    "is_market_open": True,
-                    "is_entry_permitted": True,
-                    "trading_status_message": "Custom 0DTE chain loaded.",
-                    "settlement_type": "PHYSICAL" if sym not in ["SPX", "NDX", "XSP"] else "CASH",
-                    "settlement_risk_warning": "Verify live NBBO and exercise rules before trading.",
-                    "quote_quality": "indicative—verify in broker chain",
                     "scalp_setup": None,
                     "lotto_setup": None,
                     "lotto_spread": None,
@@ -879,6 +818,7 @@ def get_options_chain_endpoint(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+
 @app.get("/api/market-ribbon")
 def get_market_ribbon_endpoint():
     """Retrieve fast cached quotes and market session status for top benchmark indices."""
@@ -906,9 +846,11 @@ def get_watchlist_summary_endpoint(tickers: str = "NVDA,AAPL,SPY,TSLA,QQQ"):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+
 @app.get("/api/volatility-cockpit")
 def get_volatility_cockpit_endpoint(ticker: str = "NVDA"):
     """Retrieve full Volatility Cockpit: IV Rank, IV Percentile, 1-yr HV envelope,
+
     Volatility Risk Premium (VRP), Term Structure, and 1-Sigma Expected Move Cones.
     """
     ticker = ticker.strip().upper()
@@ -925,55 +867,6 @@ def get_volatility_cockpit_endpoint(ticker: str = "NVDA"):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.get("/api/backtest/run")
-def run_backtest_endpoint(
-    ticker: str = "NVDA",
-    period: str = "1y",
-    sample_step: int = 15,
-    equity: float = 10000.0,
-    risk_pct: float = 1.0,
-):
-    """Execute walk-forward backtest comparing current selector against simple baselines (ATM & Fixed Delta)."""
-    ticker = ticker.strip().upper()
-    try:
-        hist = get_price_history(ticker, period=period)
-        if hist is None or len(hist) < 45:
-            raise HTTPException(status_code=400, detail=f"Insufficient history for {ticker} (need at least 45 bars, found {len(hist) if hist is not None else 0})")
-
-        risk_cfg = RiskManagementConfig(
-            account_equity=float(equity),
-            max_risk_pct=float(risk_pct) / 100.0,
-        )
-
-        engine = WalkForwardBacktestEngine(risk_cfg=risk_cfg)
-        result = engine.run_walk_forward(ticker, hist, sample_step_days=sample_step)
-        save_validation_results(result, output_path="backtest_results.json")
-
-        return sanitize_json(asdict(result))
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.error("Error running walk-forward backtest for %s: %s", ticker, exc)
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@app.get("/api/backtest/summary")
-def get_backtest_summary_endpoint():
-    """Retrieve latest cached walk-forward backtest results and baseline comparisons."""
-    path = "backtest_results.json"
-    if not os.path.exists(path):
-        return sanitize_json({
-            "status": "not_run",
-            "message": "No backtest results found. Call /api/backtest/run to execute walk-forward validation."
-        })
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return sanitize_json(data)
-    except Exception as exc:
-        logger.error("Error reading backtest summary: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
-
 
 @app.get("/api/paper-quotes")
 def get_paper_quotes_endpoint(contracts: str = ""):
@@ -985,6 +878,7 @@ def get_paper_quotes_endpoint(contracts: str = ""):
     results: Dict[str, Any] = {}
     try:
         import yfinance as yf
+        # yfinance Tickers batch fetch
         ticks = yf.Tickers(" ".join(contract_list[:30]))
         for sym in contract_list[:30]:
             try:
