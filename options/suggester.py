@@ -1,9 +1,11 @@
 """Options contract filtering, Black-Scholes Delta calculation, debit spread generation, position sizing, and institutional trade plans."""
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import logging
 import math
 from typing import List, Dict, Any, Optional, Tuple
+import zoneinfo
 import numpy as np
 import pandas as pd
 from analysis.signals import TradeSignal, BiasDirection
@@ -11,6 +13,7 @@ from config import (
     OptionsFilterConfig, HighRiskOptionsFilterConfig, ZeroDteOptionsFilterConfig, RiskManagementConfig,
     DEFAULT_CONFIG
 )
+from data.price_data import get_event_risk_profile
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +56,12 @@ class OptionTradePlan:
     probability_of_profit_pct: float      # Analytical Probability of Profit (%)
     risk_reward_ratio: float              # TP2 gain vs Stop Loss risk
     expected_value_per_contract: float    # Expected dollar value per contract
+    # New Quantitative / Institutional Risk Metrics
+    model_implied_probability_pct: float = 50.0  # Black-Scholes N(d2) risk-neutral estimate (unclipped)
+    net_expectancy: float = 0.0           # EV net of bid-ask spread, commissions, and slippage
+    round_trip_friction: float = 0.0      # Total round-trip execution cost per contract ($)
+    quote_quality: str = "indicative—verify in broker chain"
+    scenario_outcomes: List[Dict[str, Any]] = field(default_factory=list)
     # Execution Checklist Playbook
     playbook_steps: List[str] = field(default_factory=list)
     # Phase 1: Dynamic Trade Management
@@ -93,6 +102,14 @@ class OptionSuggestion:
     gamma: float = 0.0                # Black-Scholes Gamma
     theta: float = 0.0                # Black-Scholes Theta ($/day decay)
     vega: float = 0.0                 # Black-Scholes Vega ($/1% IV shift)
+    # New Quantitative Attributes
+    net_expectancy: float = 0.0       # Conservative net EV after all round-trip costs
+    round_trip_cost: float = 0.0      # Full friction: spread + 2x commissions + 2x slippage
+    model_implied_prob_pct: float = 50.0  # Raw unclipped N(d2) model-implied probability
+    quote_quality: str = "indicative—verify in broker chain"
+    is_indicative: bool = True
+    scenario_matrix: Dict[str, Any] = field(default_factory=dict)
+    event_risk_profile: Dict[str, Any] = field(default_factory=dict)
     risk_warnings: List[str] = field(default_factory=list)
     trade_plan: Optional[OptionTradePlan] = None
 
@@ -119,6 +136,7 @@ class DebitSpreadSuggestion:
     suggested_contracts: int
     total_dollar_risk: float
     spread_notes: str
+    quote_quality: str = "indicative—verify in broker chain"
     trade_plan: Optional[Dict[str, Any]] = None
 
 
@@ -138,8 +156,10 @@ class HighRiskTradeSetup:
     breakeven_price: float
     required_move_pct: float
     upside_leverage: float            # Potential payoff ratio on a 10% move
-    suggested_contracts: int          # Sized with trade risk budget (uncapped)
+    suggested_contracts: int          # Sized with trade risk budget
     total_dollar_risk: float
+    is_uncapped: bool = False
+    quote_quality: str = "indicative—verify in broker chain"
     lotto_spread: Optional[DebitSpreadSuggestion] = None
     risk_warnings: List[str] = field(default_factory=list)
     trade_plan: Optional[Dict[str, Any]] = None
@@ -153,6 +173,11 @@ class ZeroDteTradeSetup:
     bias: str
     expiration: str
     dte: int
+    is_market_open: bool
+    is_entry_permitted: bool
+    trading_status_message: str
+    settlement_type: str              # "PHYSICAL" or "CASH"
+    settlement_risk_warning: str
     # 1. ATM / Near-ATM Momentum Scalp Setup (~0.45-0.55 Delta)
     scalp_contract: str
     scalp_strike: float
@@ -183,6 +208,7 @@ class ZeroDteTradeSetup:
     lotto_spread: Optional[DebitSpreadSuggestion] = None
     # Intraday Velocity & Risk Analytics
     breakeven_velocity_per_hour: float = 0.0
+    quote_quality: str = "indicative—verify in broker chain"
     risk_warnings: List[str] = field(default_factory=list)
     trade_plan: Optional[Dict[str, Any]] = None
 
@@ -197,6 +223,8 @@ class ScreeningResult:
     elevated_iv: bool = False
     avg_iv_pct: float = 0.0
     audit_log: Dict[str, int] = field(default_factory=dict)
+    event_risk_profile: Dict[str, Any] = field(default_factory=dict)
+    rejection_reason: Optional[str] = None
 
 
 @dataclass
@@ -207,6 +235,39 @@ class OptionGreeks:
     theta: float  # Dollar decay per day per share
     vega: float   # Dollar change per 1% IV change per share
     rho: float    # Dollar change per 1% interest rate change per share
+
+
+def calculate_black_scholes_price(
+    spot: float,
+    strike: float,
+    t_years: float,
+    sigma: float,
+    r: float,
+    is_call: bool
+) -> float:
+    """Standard Black-Scholes formula for European options."""
+    if spot <= 0 or strike <= 0:
+        return 0.0
+    t = max(t_years, 0.0001)
+    sig = max(sigma, 0.01)
+
+    try:
+        d1 = (math.log(spot / strike) + (r + 0.5 * (sig ** 2)) * t) / (sig * math.sqrt(t))
+        d2 = d1 - sig * math.sqrt(t)
+
+        n_d1 = 0.5 * (1.0 + math.erf(d1 / math.sqrt(2.0)))
+        n_d2 = 0.5 * (1.0 + math.erf(d2 / math.sqrt(2.0)))
+
+        if is_call:
+            price = spot * n_d1 - strike * math.exp(-r * t) * n_d2
+        else:
+            n_minus_d1 = 0.5 * (1.0 + math.erf(-d1 / math.sqrt(2.0)))
+            n_minus_d2 = 0.5 * (1.0 + math.erf(-d2 / math.sqrt(2.0)))
+            price = strike * math.exp(-r * t) * n_minus_d2 - spot * n_minus_d1
+        return max(0.0, price)
+    except Exception:
+        intrinsic = max(0.0, spot - strike) if is_call else max(0.0, strike - spot)
+        return intrinsic
 
 
 def calculate_black_scholes_greeks(
@@ -297,7 +358,7 @@ def calculate_black_scholes_delta(
     return calculate_black_scholes_greeks(spot, strike, dte, iv, is_call, risk_free_rate).delta
 
 
-def calculate_probability_of_profit(
+def calculate_model_implied_probability(
     spot: float,
     breakeven: float,
     dte: int,
@@ -305,7 +366,12 @@ def calculate_probability_of_profit(
     is_call: bool,
     risk_free_rate: float = 0.045
 ) -> float:
-    """Calculate Probability of Profit (PoP %) at expiration based on Black-Scholes N(d2)."""
+    """Calculate theoretical Model-Implied Probability N(d2) at expiration.
+
+    NOTE: This is a Black-Scholes risk-neutral implied probability estimate,
+    NOT a realized win probability. It is deliberately unclipped to preserve
+    accurate mathematical tails (only bounded 0.01% - 99.99% for numerical sanity).
+    """
     if spot <= 0 or breakeven <= 0:
         return 50.0
     t = max((dte if dte > 0 else 0.5) / 365.0, 0.0005)
@@ -314,9 +380,237 @@ def calculate_probability_of_profit(
     try:
         d2 = (math.log(spot / breakeven) + (r - 0.5 * (sigma ** 2)) * t) / (sigma * math.sqrt(t))
         pop = 0.5 * (1.0 + math.erf(d2 / math.sqrt(2.0))) if is_call else 0.5 * (1.0 - math.erf(d2 / math.sqrt(2.0)))
-        return round(float(np.clip(pop * 100.0, 5.0, 95.0)), 1)
+        # Do NOT clip to 5.0 - 95.0%; leave pure tail probabilities intact
+        raw_pct = pop * 100.0
+        return round(float(np.clip(raw_pct, 0.01, 99.99)), 2)
     except Exception:
         return 50.0
+
+
+def calculate_probability_of_profit(
+    spot: float,
+    breakeven: float,
+    dte: int,
+    iv: float,
+    is_call: bool,
+    risk_free_rate: float = 0.045
+) -> float:
+    """Backward-compatible alias for calculate_model_implied_probability."""
+    return calculate_model_implied_probability(spot, breakeven, dte, iv, is_call, risk_free_rate)
+
+
+def compute_scenario_outcomes(
+    spot: float,
+    strike: float,
+    dte: int,
+    iv: float,
+    is_call: bool,
+    entry_price: float,
+    risk_free_rate: float = 0.045
+) -> List[Dict[str, Any]]:
+    """Compute deterministic multi-factor stress test scenarios.
+
+    Covers:
+    - 1-Sigma rally & drop
+    - IV expansion (+20%) and IV crush (-25%)
+    - 50% Time Decay (holding period half-life)
+    - Full expiration outcome (intrinsic payoff)
+    """
+    if spot <= 0 or strike <= 0 or entry_price <= 0:
+        return []
+
+    t_init = max(dte / 365.0, 0.001)
+    sig_init = max(iv, 0.05)
+    one_sigma_pct = sig_init * math.sqrt(t_init)
+
+    scenarios = [
+        {
+            "scenario": "Bull Shock (+1σ Move)",
+            "spot_target": round(spot * (1.0 + one_sigma_pct), 2),
+            "iv_target_pct": round(sig_init * 100.0, 1),
+            "dte_target": max(0, dte - 3),
+            "description": f"Underlying surges +{one_sigma_pct * 100.0:.1f}% (+1 Std Dev)"
+        },
+        {
+            "scenario": "Bear Shock (-1σ Move)",
+            "spot_target": round(spot * (1.0 - one_sigma_pct), 2),
+            "iv_target_pct": round(sig_init * 100.0, 1),
+            "dte_target": max(0, dte - 3),
+            "description": f"Underlying drops -{one_sigma_pct * 100.0:.1f}% (-1 Std Dev)"
+        },
+        {
+            "scenario": "Volatility Expansion (+25% IV)",
+            "spot_target": round(spot, 2),
+            "iv_target_pct": round(sig_init * 1.25 * 100.0, 1),
+            "dte_target": dte,
+            "description": "Pre-event IV surge or risk-off volatility spike"
+        },
+        {
+            "scenario": "Volatility Crush (-30% IV)",
+            "spot_target": round(spot, 2),
+            "iv_target_pct": round(sig_init * 0.70 * 100.0, 1),
+            "dte_target": dte,
+            "description": "Post-event volatility collapse (Earnings/Macro print pass)"
+        },
+        {
+            "scenario": "Time Decay Half-Life (50% DTE)",
+            "spot_target": round(spot, 2),
+            "iv_target_pct": round(sig_init * 100.0, 1),
+            "dte_target": max(1, dte // 2),
+            "description": f"Holding period elapsed to {max(1, dte // 2)} DTE with sideways spot"
+        },
+        {
+            "scenario": "Expiry Intrinsic Payoff",
+            "spot_target": round(spot, 2),
+            "iv_target_pct": 0.0,
+            "dte_target": 0,
+            "description": "Expiration value if underlying remains exactly at spot"
+        },
+    ]
+
+    results = []
+    for sc in scenarios:
+        s_target = sc["spot_target"]
+        sig_target = max(sc["iv_target_pct"] / 100.0, 0.01)
+        t_target = max(sc["dte_target"] / 365.0, 0.0)
+
+        if sc["dte_target"] == 0 or t_target <= 0.0001:
+            # Expiration intrinsic
+            sim_opt_px = max(0.0, s_target - strike) if is_call else max(0.0, strike - s_target)
+        else:
+            sim_opt_px = calculate_black_scholes_price(
+                spot=s_target,
+                strike=strike,
+                t_years=t_target,
+                sigma=sig_target,
+                r=risk_free_rate,
+                is_call=is_call
+            )
+
+        sim_opt_px = round(sim_opt_px, 2)
+        pnl_dollar = round((sim_opt_px - entry_price) * 100.0, 2)
+        pnl_pct = round(((sim_opt_px - entry_price) / entry_price) * 100.0, 1)
+
+        results.append({
+            "scenario": sc["scenario"],
+            "description": sc["description"],
+            "spot_target": s_target,
+            "simulated_option_price": sim_opt_px,
+            "pnl_per_contract": pnl_dollar,
+            "pnl_pct": pnl_pct,
+            "is_profitable": pnl_dollar > 0,
+        })
+
+    return results
+
+
+def calculate_round_trip_friction(
+    ask: float,
+    bid: float,
+    commission_per_contract: float = 0.65,
+    slippage_pct: float = 0.02
+) -> float:
+    """Model conservative round-trip execution penalty per contract ($).
+
+    Includes:
+    - Bid-Ask half-spread entry penalty + exit penalty = Full Bid-Ask Spread * 100
+    - Commissions: Round-trip buy + sell = 2 * commission_per_contract
+    - Execution Slippage: 2% entry slippage + 2% exit slippage
+    """
+    spread_friction = max(0.0, ask - bid) * 100.0
+    commission_friction = 2.0 * commission_per_contract
+    slippage_friction = 2.0 * (ask * slippage_pct * 100.0)
+    total_friction = spread_friction + commission_friction + slippage_friction
+    return round(total_friction, 2)
+
+
+def calculate_net_expectancy(
+    entry_cost: float,
+    model_implied_pop: float,
+    round_trip_friction: float,
+    target_gain_pct: float = 0.50,
+    stop_loss_pct: float = 0.50
+) -> float:
+    """Calculate conservative net expectancy per contract ($) after all execution frictions.
+
+    Gross Win = target_gain_pct * entry_cost * 100
+    Gross Loss = stop_loss_pct * entry_cost * 100
+    Net Win = Gross Win - friction
+    Net Loss = Gross Loss + friction
+    Net EV = (P_win * Net Win) - (P_loss * Net Loss)
+    """
+    p_win = model_implied_pop / 100.0
+    p_loss = 1.0 - p_win
+
+    gross_win = target_gain_pct * entry_cost * 100.0
+    gross_loss = stop_loss_pct * entry_cost * 100.0
+
+    net_win = gross_win - round_trip_friction
+    net_loss = gross_loss + round_trip_friction
+
+    ev_net = (p_win * net_win) - (p_loss * net_loss)
+    return round(ev_net, 2)
+
+
+def compute_position_sizing(
+    contract_cost: float,
+    risk_cfg: RiskManagementConfig,
+    custom_risk_pct: Optional[float] = None,
+    is_uncapped: bool = False
+) -> Tuple[int, float, float, float, bool]:
+    """Calculate position size and stop loss in dollars based on account equity and risk percentage.
+
+    Hard Affordability Rule:
+    - Does NOT force 1 contract if it exceeds the stated risk budget.
+    - If risk budget < single contract planned risk, returns (0, 0.0, stop_px, 0.0, False).
+    - Uncapped is strictly opt-in (risk_cfg.allow_uncapped_speculative), with maximum contracts
+      and daily-loss guardrails.
+
+    Returns:
+        (contracts, total_max_loss, stop_loss_price, stop_loss_dollar, is_affordable)
+    """
+    max_loss_one = contract_cost * 100.0
+    effective_risk_pct = custom_risk_pct if custom_risk_pct is not None else risk_cfg.max_risk_pct
+    budget = risk_cfg.account_equity * effective_risk_pct
+    stop_loss_price = round(contract_cost * (1.0 - risk_cfg.stop_loss_pct), 2)
+
+    if max_loss_one <= 0 or contract_cost <= 0:
+        return 0, 0.0, stop_loss_price, 0.0, False
+
+    single_stop_loss_risk = max_loss_one * risk_cfg.stop_loss_pct
+
+    # Hard affordability rule check
+    if budget < single_stop_loss_risk or max_loss_one > risk_cfg.account_equity:
+        if not risk_cfg.allow_unaffordable:
+            # Hard rejection: do not force 1 contract!
+            return 0, 0.0, stop_loss_price, 0.0, False
+        else:
+            contracts = 1
+    else:
+        contracts = int(budget // single_stop_loss_risk)
+
+    # Check uncapped sizing rule (opt-in only)
+    if is_uncapped:
+        if risk_cfg.allow_uncapped_speculative:
+            uncapped_raw = int(budget // max_loss_one)
+            contracts = max(contracts, uncapped_raw)
+        # If not opted-in, falls back to standard capped sizing
+
+    # Guardrails: Maximum contracts cap
+    contracts = min(contracts, risk_cfg.max_contracts_cap)
+
+    # Guardrails: Daily loss ceiling
+    planned_dollar_risk = contracts * single_stop_loss_risk
+    if planned_dollar_risk > risk_cfg.max_daily_loss_budget:
+        contracts = max(0, int(risk_cfg.max_daily_loss_budget // single_stop_loss_risk))
+
+    if contracts < 1:
+        return 0, 0.0, stop_loss_price, 0.0, False
+
+    total_max_loss = round(contracts * max_loss_one, 2)
+    stop_loss_dollar = round(contracts * single_stop_loss_risk, 2)
+
+    return contracts, total_max_loss, stop_loss_price, stop_loss_dollar, True
 
 
 def build_option_trade_plan(
@@ -337,8 +631,10 @@ def build_option_trade_plan(
     stop_loss_dollar: float,
     breakeven_px: float,
     contract_symbol: str = "",
+    risk_cfg: Optional[RiskManagementConfig] = None,
 ) -> OptionTradePlan:
     """Build a complete, disciplined institutional trade plan for an options position."""
+    risk_cfg = risk_cfg or DEFAULT_CONFIG.risk
     entry_mid = round(max(mid_price, 0.05), 2)
     entry_ask = round(max(ask, 0.05), 2)
     entry_zone = f"${entry_mid:.2f} – ${entry_ask:.2f}"
@@ -354,7 +650,7 @@ def build_option_trade_plan(
     # 2. Target 2 (+100% option gain / Core Target)
     tp2_opt_px = round(entry_mid * 2.00, 2)
     tp2_gain = round((tp2_opt_px - entry_mid) * 100.0, 2)
-    eff_delta_2 = min(abs_delta + 0.12, 0.85)  # Account for gamma expansion
+    eff_delta_2 = min(abs_delta + 0.12, 0.85)
     delta_move_2 = (tp2_opt_px - entry_mid) / eff_delta_2
     tp2_underlying = round(spot_price + delta_move_2 if is_call else spot_price - delta_move_2, 2)
     tp2_action = f"Take profit on 30–50% of position at ${tp2_opt_px:.2f} (+100%); let remaining runners ride with trailing stop."
@@ -380,8 +676,8 @@ def build_option_trade_plan(
         f"OR if underlying closes beyond ${underlying_inval:.2f}."
     )
 
-    # 5. Probability of Profit (PoP %)
-    pop_pct = calculate_probability_of_profit(
+    # 5. Model-Implied Probability N(d2) (Risk-Neutral Estimate)
+    model_implied_pop = calculate_model_implied_probability(
         spot=spot_price,
         breakeven=breakeven_px,
         dte=dte,
@@ -392,12 +688,33 @@ def build_option_trade_plan(
     # 6. Risk-to-Reward
     rr_ratio = round(tp2_gain / sl_dollar, 2) if sl_dollar > 0 else 2.0
 
-    # 7. Expected Value ($/contract)
-    p_win = pop_pct / 100.0
-    p_loss = 1.0 - p_win
-    ev_val = round((p_win * tp1_gain) - (p_loss * sl_dollar), 2)
+    # 7. Conservative Net Expectancy (after spread, commissions, slippage)
+    friction_rt = calculate_round_trip_friction(
+        ask=entry_ask,
+        bid=max(bid, 0.01),
+        commission_per_contract=risk_cfg.commission_per_contract,
+        slippage_pct=risk_cfg.slippage_pct
+    )
+    net_ev = calculate_net_expectancy(
+        entry_cost=entry_ask,
+        model_implied_pop=model_implied_pop,
+        round_trip_friction=friction_rt,
+        target_gain_pct=0.50,
+        stop_loss_pct=0.50
+    )
 
-    # 8. Theta & Time Stop
+    # 8. Scenario Outcomes Stress Matrix
+    scenario_matrix = compute_scenario_outcomes(
+        spot=spot_price,
+        strike=strike,
+        dte=dte,
+        iv=iv_pct / 100.0,
+        is_call=is_call,
+        entry_price=entry_ask,
+        risk_free_rate=0.045
+    )
+
+    # 9. Theta & Time Stop
     daily_theta_dollar = round(abs(theta) * 100.0, 2) if theta != 0.0 else round(entry_mid * 0.03 * 100.0, 2)
     max_hold_days = min(12, max(3, dte - 14))
     time_rule = (
@@ -405,7 +722,7 @@ def build_option_trade_plan(
         f"to prevent severe theta decay acceleration (decay: -${daily_theta_dollar:.2f}/contract/day)."
     )
 
-    # 9. Playbook steps
+    # 10. Playbook steps
     playbook_steps = [
         f"1. Entry: Limit order at mid-price ${entry_mid:.2f} (entry zone {entry_zone}). Do not chase ask at ${entry_ask:.2f}.",
         f"2. De-Risk (TP1): At ${tp1_opt_px:.2f} (+50%), sell 50% contracts and move stop loss on remainder to Breakeven (${entry_mid:.2f}).",
@@ -414,7 +731,7 @@ def build_option_trade_plan(
         f"5. Time Stop: Close position if trade stalls after {max_hold_days} days or reaches 21 DTE to defend against theta decay."
     ]
 
-    # Phase 1: Dynamic Ratchet Stop Ladder (Phases 1 - 4)
+    # Dynamic Ratchet Stop Ladder (Phases 1 - 4)
     ratchet_ladder = [
         {
             "stage_num": 1,
@@ -470,7 +787,7 @@ def build_option_trade_plan(
         },
     ]
 
-    # Phase 1: Defensive Adjustment & Rolling Playbook
+    # Defensive Adjustment & Rolling Playbook
     spread_strike = round(strike * 1.05 if is_call else strike * 0.95, 1)
     rolling_playbook = {
         "defensive_time_roll": {
@@ -496,7 +813,7 @@ def build_option_trade_plan(
         },
     }
 
-    # Phase 1: Broker Bracket Order Generator (Standard, TOS, IBKR, Webull)
+    # Broker Bracket Order Generator
     half_contracts = max(1, contracts // 2)
     rem_contracts = max(1, contracts - half_contracts)
     opt_label = f"{contract_symbol}" if contract_symbol else f"{'CALL' if is_call else 'PUT'} ${strike:.1f}"
@@ -564,38 +881,19 @@ def build_option_trade_plan(
         daily_theta_decay=daily_theta_dollar,
         max_holding_period_days=max_hold_days,
         time_stop_rule=time_rule,
-        probability_of_profit_pct=pop_pct,
+        probability_of_profit_pct=model_implied_pop,
         risk_reward_ratio=rr_ratio,
-        expected_value_per_contract=ev_val,
+        expected_value_per_contract=net_ev,
+        model_implied_probability_pct=model_implied_pop,
+        net_expectancy=net_ev,
+        round_trip_friction=friction_rt,
+        quote_quality="indicative—verify in broker chain",
+        scenario_outcomes=scenario_matrix,
         playbook_steps=playbook_steps,
         ratchet_ladder=ratchet_ladder,
         rolling_playbook=rolling_playbook,
         broker_bracket_order=broker_bracket_order,
     )
-
-
-def compute_position_sizing(
-    contract_cost: float,
-    risk_cfg: RiskManagementConfig,
-    custom_risk_pct: Optional[float] = None
-) -> Tuple[int, float, float, float]:
-    """Calculate position size and stop loss in dollars based on account equity and risk percentage."""
-    max_loss_one = contract_cost * 100.0
-    effective_risk_pct = custom_risk_pct if custom_risk_pct is not None else risk_cfg.max_risk_pct
-    budget = risk_cfg.account_equity * effective_risk_pct
-
-    if max_loss_one <= 0:
-        return 1, 0.0, 0.0, 0.0
-
-    contracts = int(budget // max_loss_one)
-    if contracts < 1:
-        contracts = 1
-
-    total_max_loss = round(contracts * max_loss_one, 2)
-    stop_loss_price = round(contract_cost * (1.0 - risk_cfg.stop_loss_pct), 2)
-    stop_loss_dollar = round(total_max_loss * risk_cfg.stop_loss_pct, 2)
-
-    return contracts, total_max_loss, stop_loss_price, stop_loss_dollar
 
 
 def rank_and_filter_contracts(
@@ -605,7 +903,16 @@ def rank_and_filter_contracts(
     filter_cfg: Optional[OptionsFilterConfig] = None,
     risk_cfg: Optional[RiskManagementConfig] = None
 ) -> Tuple[List[OptionSuggestion], Dict[str, int]]:
-    """Filter by delta (0.30-0.55), volume, open interest, and spread; then rank candidates."""
+    """Filter and rank candidate contracts on conservative net expectancy after execution costs.
+
+    Enforces:
+    1. Liquidity eligibility: nonzero bid/ask, tight absolute spread (<= max_absolute_spread),
+       tight percentage spread (<= max_spread_pct_of_mid), meaningful open interest, and volume.
+    2. Hard affordability: reject contracts exceeding stated risk budget (never force 1 contract).
+    3. Conservative net expectancy: model entry at ask, exit at bid, round-trip commissions,
+       and slippage; reject candidates with net EV <= min_net_expectancy.
+    4. Data quality: label all quotes as 'indicative—verify in broker chain'.
+    """
     if df is None or df.empty or spot_price <= 0:
         return [], {"initial_count": 0}
 
@@ -616,15 +923,18 @@ def rank_and_filter_contracts(
     audit = {
         "initial_count": len(df),
         "rejected_min_bid": 0,
+        "rejected_abs_spread": 0,
+        "rejected_spread_pct": 0,
         "rejected_volume_oi": 0,
-        "rejected_spread": 0,
         "rejected_delta": 0,
+        "rejected_affordability": 0,
+        "rejected_negative_ev": 0,
         "passed_strict": 0,
     }
 
     data = df.copy()
 
-    # Pre-calculate Mid Price & Spread % of Mid
+    # Pre-calculate Mid Price & Spreads
     data["mid_price"] = ((data["bid"] + data["ask"]) / 2.0).round(2)
     data["spread"] = (data["ask"] - data["bid"]).clip(lower=0.0).round(2)
     data["spread_pct_of_mid"] = data.apply(
@@ -632,16 +942,13 @@ def rank_and_filter_contracts(
     )
 
     # Calculate Black-Scholes Greeks for every contract
-    deltas = []
-    gammas = []
-    thetas = []
-    vegas = []
+    deltas, gammas, thetas, vegas = [], [], [], []
     for _, row in data.iterrows():
         g = calculate_black_scholes_greeks(
             spot=spot_price,
             strike=float(row["strike"]),
             dte=int(row["dte"]),
-            iv=float(row["impliedVolatility"]),
+            iv=float(row.get("impliedVolatility", 0.30)),
             is_call=is_call,
             risk_free_rate=filter_cfg.risk_free_rate
         )
@@ -649,6 +956,7 @@ def rank_and_filter_contracts(
         gammas.append(g.gamma)
         thetas.append(g.theta)
         vegas.append(g.vega)
+
     data["delta"] = deltas
     data["abs_delta"] = [abs(d) for d in deltas]
     data["gamma"] = gammas
@@ -660,58 +968,103 @@ def rank_and_filter_contracts(
     else:
         data["moneyness_pct"] = ((spot_price / data["strike"] - 1.0) * 100.0).round(2)
 
-    valid_rows = []
+    candidate_rows = []
     for _, r in data.iterrows():
+        # 1. Nonzero bid / ask sanity
         if r["bid"] < filter_cfg.min_bid or r["ask"] <= r["bid"]:
             audit["rejected_min_bid"] += 1
             continue
+
+        # 2. Tight absolute spread
+        if r["spread"] > filter_cfg.max_absolute_spread:
+            audit["rejected_abs_spread"] += 1
+            continue
+
+        # 3. Tight percentage spread of mid
+        if r["spread_pct_of_mid"] > filter_cfg.max_spread_pct_of_mid:
+            audit["rejected_spread_pct"] += 1
+            continue
+
+        # 4. Meaningful volume & open interest
         if r["volume"] < filter_cfg.min_volume or r["openInterest"] < filter_cfg.min_open_interest:
             audit["rejected_volume_oi"] += 1
             continue
-        if r["spread_pct_of_mid"] > filter_cfg.max_spread_pct_of_mid:
-            audit["rejected_spread"] += 1
-            continue
+
+        # 5. Delta targeting window
         if not (filter_cfg.min_delta <= r["abs_delta"] <= filter_cfg.max_delta):
             audit["rejected_delta"] += 1
             continue
-        valid_rows.append(r)
 
-    audit["passed_strict"] = len(valid_rows)
+        # 6. Hard Affordability Rule: reject if account budget cannot afford 1 contract
+        ask_val = float(r["ask"])
+        contracts, _, _, _, is_affordable = compute_position_sizing(ask_val, risk_cfg)
+        if not is_affordable or contracts < 1:
+            audit["rejected_affordability"] += 1
+            continue
 
-    # Fallback if strict criteria yielded 0 candidates
-    if not valid_rows:
-        logger.info("Strict delta/liquidity filter yielded 0 contracts. Applying relaxed screening.")
-        for _, r in data.iterrows():
-            if r["bid"] < 0.02 or r["ask"] <= r["bid"]:
-                continue
-            if r["volume"] < 5 or r["openInterest"] < 25:
-                continue
-            if r["spread_pct_of_mid"] > 0.20:
-                continue
-            if not (0.20 <= r["abs_delta"] <= 0.65):
-                continue
-            valid_rows.append(r)
+        # 7. Model-implied probability and conservative net expectancy
+        strike_val = float(r["strike"])
+        be_price = round(strike_val + ask_val if is_call else strike_val - ask_val, 2)
+        dte_val = int(r["dte"])
+        iv_val = float(r.get("impliedVolatility", 0.30))
 
-    if not valid_rows:
+        pop_val = calculate_model_implied_probability(
+            spot=spot_price,
+            breakeven=be_price,
+            dte=dte_val,
+            iv=iv_val,
+            is_call=is_call,
+            risk_free_rate=filter_cfg.risk_free_rate
+        )
+
+        friction_rt = calculate_round_trip_friction(
+            ask=ask_val,
+            bid=float(r["bid"]),
+            commission_per_contract=risk_cfg.commission_per_contract,
+            slippage_pct=risk_cfg.slippage_pct
+        )
+
+        net_ev = calculate_net_expectancy(
+            entry_cost=ask_val,
+            model_implied_pop=pop_val,
+            round_trip_friction=friction_rt,
+            target_gain_pct=0.50,
+            stop_loss_pct=risk_cfg.stop_loss_pct
+        )
+
+        # 8. Net expectancy filter: reject if EV after costs is not positive
+        if net_ev <= risk_cfg.min_net_expectancy:
+            audit["rejected_negative_ev"] += 1
+            continue
+
+        r_dict = r.to_dict()
+        r_dict["breakeven"] = be_price
+        r_dict["req_move"] = round(((be_price - spot_price) / spot_price * 100.0) if is_call else ((spot_price - be_price) / spot_price * 100.0), 2)
+        r_dict["model_implied_pop"] = pop_val
+        r_dict["round_trip_friction"] = friction_rt
+        r_dict["net_ev"] = net_ev
+        r_dict["contracts_sized"] = contracts
+        candidate_rows.append(r_dict)
+
+    audit["passed_strict"] = len(candidate_rows)
+
+    if not candidate_rows:
+        logger.info(f"0 contracts passed strict liquidity, affordability, and net EV criteria. Audit: {audit}")
         return [], audit
 
-    filtered = pd.DataFrame(valid_rows)
+    filtered = pd.DataFrame(candidate_rows)
 
-    if is_call:
-        filtered["breakeven"] = (filtered["strike"] + filtered["ask"]).round(2)
-        filtered["req_move"] = (((filtered["breakeven"] - spot_price) / spot_price) * 100.0).round(2)
-    else:
-        filtered["breakeven"] = (filtered["strike"] - filtered["ask"]).round(2)
-        filtered["req_move"] = (((spot_price - filtered["breakeven"]) / spot_price) * 100.0).round(2)
-
+    # Rank primarily on conservative net expectancy (EV net of all friction)
+    # Plus secondary terms for delta proximity and liquidity depth
+    ev_score = (filtered["net_ev"].clip(-20.0, 100.0) / 100.0) * 45.0
     delta_diff = (filtered["abs_delta"] - filter_cfg.target_delta).abs()
-    delta_score = (1.0 - (delta_diff / 0.15).clip(0.0, 1.0)) * 40.0
-    spread_score = (1.0 - (filtered["spread_pct_of_mid"] / filter_cfg.max_spread_pct_of_mid).clip(0.0, 1.0)) * 35.0
+    delta_score = (1.0 - (delta_diff / 0.15).clip(0.0, 1.0)) * 25.0
+    spread_score = (1.0 - (filtered["spread_pct_of_mid"] / filter_cfg.max_spread_pct_of_mid).clip(0.0, 1.0)) * 15.0
     log_liq = np.log1p(filtered["volume"] + filtered["openInterest"])
-    liq_score = (log_liq / 9.5).clip(0.0, 1.0) * 25.0
+    liq_score = (log_liq / 9.5).clip(0.0, 1.0) * 15.0
 
-    filtered["rank_score"] = (delta_score + spread_score + liq_score).round(1)
-    ranked = filtered.sort_values(by="rank_score", ascending=False).head(filter_cfg.top_n_suggestions)
+    filtered["rank_score"] = (ev_score + delta_score + spread_score + liq_score).round(1)
+    ranked = filtered.sort_values(by=["rank_score", "net_ev"], ascending=[False, False]).head(filter_cfg.top_n_suggestions)
 
     suggestions: List[OptionSuggestion] = []
     for _, row in ranked.iterrows():
@@ -721,16 +1074,21 @@ def rank_and_filter_contracts(
         bid_val = float(row["bid"])
         mid_val = float(row["mid_price"])
         spread_pct = round(float(row["spread_pct_of_mid"]) * 100.0, 1)
+        contracts = int(row["contracts_sized"])
+        max_loss_one = ask_val * 100.0
+        total_loss = round(contracts * max_loss_one, 2)
+        stop_px = round(ask_val * (1.0 - risk_cfg.stop_loss_pct), 2)
+        stop_dollar = round(contracts * max_loss_one * risk_cfg.stop_loss_pct, 2)
 
-        contracts, total_loss, stop_px, stop_dollar = compute_position_sizing(ask_val, risk_cfg)
-
-        warnings = []
+        warnings = [
+            "Indicative quote: Real-time NBBO timestamp/depth not provided by feed. Verify live bid/ask in broker chain before order entry."
+        ]
         if iv_pct >= filter_cfg.elevated_iv_threshold:
-            warnings.append(f"Elevated IV ({iv_pct}%) – High volatility premium; consider debit spread.")
+            warnings.append(f"Elevated IV ({iv_pct}%) – High volatility premium; consider defined-risk debit spread.")
         if spread_pct > 7.0:
-            warnings.append(f"Spread warning ({spread_pct}% of mid) – Use limit orders.")
+            warnings.append(f"Spread warning ({spread_pct}% of mid) – Model assumes execution penalty; strictly use limit orders.")
         if int(row["openInterest"]) < 300:
-            warnings.append(f"Moderate OI ({int(row['openInterest']):,}) – Monitor liquidity.")
+            warnings.append(f"Moderate OI ({int(row['openInterest']):,}) – Monitor liquidity depth.")
         if dte < 21:
             warnings.append(f"Theta acceleration: {dte} DTE remaining.")
 
@@ -752,6 +1110,17 @@ def rank_and_filter_contracts(
             stop_loss_dollar=stop_dollar,
             breakeven_px=float(row["breakeven"]),
             contract_symbol=str(row["contractSymbol"]),
+            risk_cfg=risk_cfg,
+        )
+
+        scenario_matrix = compute_scenario_outcomes(
+            spot=spot_price,
+            strike=float(row["strike"]),
+            dte=dte,
+            iv=iv_pct / 100.0,
+            is_call=is_call,
+            entry_price=ask_val,
+            risk_free_rate=filter_cfg.risk_free_rate
         )
 
         suggestions.append(
@@ -759,7 +1128,7 @@ def rank_and_filter_contracts(
                 contract_symbol=str(row["contractSymbol"]),
                 option_type=option_type,
                 strike=float(row["strike"]),
-                expiration=str(row["expiration"]),
+                expiration=str(row.get("expiration", "N/A")),
                 dte=dte,
                 spot_price=round(spot_price, 2),
                 bid=bid_val,
@@ -784,6 +1153,12 @@ def rank_and_filter_contracts(
                 total_dollar_risk=total_loss,
                 suggested_stop_loss_price=stop_px,
                 stop_loss_dollar_risk=stop_dollar,
+                net_expectancy=float(row["net_ev"]),
+                round_trip_cost=float(row["round_trip_friction"]),
+                model_implied_prob_pct=float(row["model_implied_pop"]),
+                quote_quality="indicative—verify in broker chain",
+                is_indicative=True,
+                scenario_matrix={"scenarios": scenario_matrix},
                 risk_warnings=warnings,
                 trade_plan=t_plan,
             )
@@ -841,7 +1216,9 @@ def build_debit_spread(
         be_price = round(primary_opt.strike - net_debit, 2)
         spread_type = "Bear Put Debit Spread"
 
-    contracts, total_loss, _, _ = compute_position_sizing(net_debit, risk_cfg)
+    contracts, total_loss, _, _, is_affordable = compute_position_sizing(net_debit, risk_cfg)
+    if not is_affordable or contracts < 1:
+        return None
 
     short_delta = calculate_black_scholes_delta(
         spot_price, short_strike, primary_opt.dte,
@@ -862,6 +1239,7 @@ def build_debit_spread(
         "stop_dollar_loss": round(max_loss * 0.50, 2),
         "max_holding_period_days": min(14, max(4, primary_opt.dte - 5)),
         "time_stop_rule": "Close spread 3–5 trading days prior to expiration if underlying has not crossed short strike.",
+        "quote_quality": "indicative—verify in broker chain",
         "playbook_steps": [
             f"1. Entry: Execute as single-order vertical debit spread at net debit limit ${net_debit:.2f}.",
             f"2. Profit Target: Set GTC limit order to close at ${net_debit + (width - net_debit) * 0.75:.2f} (75% of max profit).",
@@ -890,6 +1268,7 @@ def build_debit_spread(
         suggested_contracts=contracts,
         total_dollar_risk=total_loss,
         spread_notes=notes,
+        quote_quality="indicative—verify in broker chain",
         trade_plan=spread_plan,
     )
 
@@ -901,7 +1280,10 @@ def build_high_risk_setup(
     high_risk_cfg: HighRiskOptionsFilterConfig,
     risk_cfg: RiskManagementConfig
 ) -> Optional[HighRiskTradeSetup]:
-    """Construct an asymmetric high-risk trade setup: OTM moonshot contract (0.15-0.28Delta) + high R:R lotto spread."""
+    """Construct an asymmetric high-risk trade setup: OTM moonshot contract (0.15-0.28Delta) + high R:R lotto spread.
+
+    Uncapped position sizing is strictly opt-in with guardrails for max contracts and daily loss.
+    """
     if chain_df is None or chain_df.empty or spot_price <= 0:
         return None
 
@@ -978,10 +1360,16 @@ def build_high_risk_setup(
         intrinsic = max(0.0, strike - sim_price)
         leverage = round((intrinsic / ask_val), 1) if ask_val > 0 else 2.5
 
-    # Position size with trade risk budget (uncapped)
-    contracts, total_loss, _, _ = compute_position_sizing(
-        ask_val, risk_cfg, custom_risk_pct=high_risk_cfg.speculative_risk_pct
+    # Position size with trade risk budget, opt-in uncapped flag & guardrails
+    is_uncapped_active = high_risk_cfg.allow_uncapped and risk_cfg.allow_uncapped_speculative
+    contracts, total_loss, _, _, is_affordable = compute_position_sizing(
+        ask_val, risk_cfg,
+        custom_risk_pct=high_risk_cfg.speculative_risk_pct,
+        is_uncapped=is_uncapped_active
     )
+
+    if not is_affordable or contracts < 1:
+        return None
 
     # Attempt to build asymmetric lotto spread (target >= 2.5:1 R:R)
     same_exp = data[data["expiration"] == exp]
@@ -1011,30 +1399,38 @@ def build_high_risk_setup(
             rr = round(m_prof / m_loss, 2) if m_loss > 0 else 0.0
             if rr >= 2.0:
                 lotto_be = round(strike + net_d, 2) if is_call else round(strike - net_d, 2)
-                lotto_contracts, lotto_total_loss, _, _ = compute_position_sizing(
-                    net_d, risk_cfg, custom_risk_pct=high_risk_cfg.speculative_risk_pct
+                lotto_contracts, lotto_total_loss, _, _, sp_afford = compute_position_sizing(
+                    net_d, risk_cfg,
+                    custom_risk_pct=high_risk_cfg.speculative_risk_pct,
+                    is_uncapped=is_uncapped_active
                 )
-                lotto_spread = DebitSpreadSuggestion(
-                    spread_type=f"Asymmetric {option_type.capitalize()} Lotto Spread ({rr:.1f}:1 R:R)",
-                    expiration=exp,
-                    dte=dte,
-                    long_contract=str(best_row["contractSymbol"]),
-                    long_strike=strike,
-                    long_ask=ask_val,
-                    long_delta=delta_val,
-                    short_contract=str(partner["contractSymbol"]),
-                    short_strike=s_strike,
-                    short_bid=s_bid,
-                    short_delta=float(partner.get("delta", 0.10)),
-                    net_debit=net_d,
-                    max_loss_per_contract=m_loss,
-                    max_profit_per_contract=m_prof,
-                    breakeven_price=lotto_be,
-                    risk_reward_ratio=rr,
-                    suggested_contracts=lotto_contracts,
-                    total_dollar_risk=lotto_total_loss,
-                    spread_notes=f"High-asymmetry spread targeting {rr:.1f}:1 payout. Max profit ${m_prof:.0f} on ${m_loss:.0f} risk.",
-                )
+                if sp_afford and lotto_contracts >= 1:
+                    lotto_spread = DebitSpreadSuggestion(
+                        spread_type=f"Asymmetric {option_type.capitalize()} Lotto Spread ({rr:.1f}:1 R:R)",
+                        expiration=exp,
+                        dte=dte,
+                        long_contract=str(best_row["contractSymbol"]),
+                        long_strike=strike,
+                        long_ask=ask_val,
+                        long_delta=delta_val,
+                        short_contract=str(partner["contractSymbol"]),
+                        short_strike=s_strike,
+                        short_bid=s_bid,
+                        short_delta=float(partner.get("delta", 0.10)),
+                        net_debit=net_d,
+                        max_loss_per_contract=m_loss,
+                        max_profit_per_contract=m_prof,
+                        breakeven_price=lotto_be,
+                        risk_reward_ratio=rr,
+                        suggested_contracts=lotto_contracts,
+                        total_dollar_risk=lotto_total_loss,
+                        spread_notes=f"High-asymmetry spread targeting {rr:.1f}:1 payout. Max profit ${m_prof:.0f} on ${m_loss:.0f} risk.",
+                        quote_quality="indicative—verify in broker chain"
+                    )
+
+    model_pop = calculate_model_implied_probability(
+        spot_price, be_price, dte, float(best_row.get("impliedVolatility", 0.40)), is_call
+    )
 
     high_risk_plan = {
         "entry_strategy": f"Limit order at mid-price ${mid_val:.2f} (ask is ${ask_val:.2f}).",
@@ -1065,7 +1461,8 @@ def build_high_risk_setup(
             "max_holding_days": 5,
             "rule": "Close position if momentum does not follow through within 5 trading days. OTM options decay rapidly.",
         },
-        "pop_pct": calculate_probability_of_profit(spot_price, be_price, dte, float(best_row.get("impliedVolatility", 0.40)), is_call),
+        "model_implied_pop_pct": model_pop,
+        "is_uncapped_active": is_uncapped_active,
         "playbook_steps": [
             f"1. Entry: Place limit order at mid-price ${mid_val:.2f}.",
             f"2. Free Ride Scale (TP1): At ${ask_val * 2.0:.2f} (+100%), sell 50% of contracts to recoup your full initial capital.",
@@ -1076,10 +1473,14 @@ def build_high_risk_setup(
     }
 
     warnings = [
-        f"⚡ High Risk (OTM {abs(moneyness)}%): Low probability of expiring ITM (~20-25%).",
+        "Indicative quote: Real-time NBBO timestamp/depth not provided by feed. Verify live quotes in broker chain.",
+        f"⚡ High Risk (OTM {abs(moneyness)}%): Model-implied probability of expiring ITM is {model_pop:.1f}%.",
         f"⚡ Rapid Theta Decay: {dte} DTE remaining.",
-        "⚡ Speculative Capital Only: Uncapped sizing utilizing full trade risk budget.",
     ]
+    if is_uncapped_active:
+        warnings.append(f"⚡ Uncapped Speculative Mode ACTIVE: Capped at {risk_cfg.max_contracts_cap} contracts or ${risk_cfg.max_daily_loss_budget} daily loss limit.")
+    else:
+        warnings.append("⚡ Uncapped Mode Disabled: Sized with standard risk guardrails.")
 
     setup_title = f"Asymmetric Moonshot {option_type.capitalize()} ({delta_val:+.2f}Delta)"
 
@@ -1099,10 +1500,53 @@ def build_high_risk_setup(
         upside_leverage=max(leverage, 2.0),
         suggested_contracts=contracts,
         total_dollar_risk=total_loss,
+        is_uncapped=is_uncapped_active,
+        quote_quality="indicative—verify in broker chain",
         lotto_spread=lotto_spread,
         risk_warnings=warnings,
         trade_plan=high_risk_plan,
     )
+
+
+def check_0dte_market_session(zero_dte_cfg: ZeroDteOptionsFilterConfig) -> Tuple[bool, bool, str]:
+    """Check current market session against regular trading hours and 0DTE cutoffs (US/Eastern).
+
+    Returns:
+        (is_market_open, is_entry_permitted, status_message)
+    """
+    if not zero_dte_cfg.enforce_market_hours:
+        return True, True, "Market hours enforcement disabled in configuration."
+
+    now_et = datetime.now(zoneinfo.ZoneInfo("America/New_York"))
+    # Check weekday (0 = Monday, ..., 4 = Friday)
+    if now_et.weekday() >= 5:
+        return False, False, f"Market Closed: Weekend session ({now_et.strftime('%A %I:%M %p %Z')}). 0DTE trading inactive."
+
+    current_minute_of_day = now_et.hour * 60 + now_et.minute
+    market_open_minute = 9 * 60 + 30    # 9:30 AM ET
+    market_close_minute = 16 * 60       # 4:00 PM ET
+    entry_cutoff_minute = zero_dte_cfg.entry_cutoff_hour * 60  # e.g. 14:00 = 2:00 PM ET
+    exit_cutoff_minute = zero_dte_cfg.exit_cutoff_hour * 60 + zero_dte_cfg.exit_cutoff_minute  # 15:45 = 3:45 PM ET
+
+    if current_minute_of_day < market_open_minute:
+        return False, False, f"Pre-Market: Market opens at 9:30 AM ET (Current: {now_et.strftime('%I:%M %p %Z')}). No 0DTE executions allowed."
+
+    if current_minute_of_day >= market_close_minute:
+        return False, False, f"Market Closed: Session closed at 4:00 PM ET (Current: {now_et.strftime('%I:%M %p %Z')})."
+
+    if current_minute_of_day >= exit_cutoff_minute:
+        return True, False, (
+            f"0DTE Liquidation Window: Past {zero_dte_cfg.exit_cutoff_hour}:{zero_dte_cfg.exit_cutoff_minute:02d} PM ET mandatory exit cutoff. "
+            f"Holding past this cutoff creates critical close-of-day assignment/pin risk."
+        )
+
+    if current_minute_of_day >= entry_cutoff_minute:
+        return True, False, (
+            f"0DTE Entry Cutoff Passed: Past {zero_dte_cfg.entry_cutoff_hour}:00 PM ET entry cutoff. "
+            f"Only existing position management permitted to avoid catastrophic late-day gamma liquidation."
+        )
+
+    return True, True, f"0DTE Active: Regular market session ({now_et.strftime('%I:%M %p %Z')}). Entry permitted until {zero_dte_cfg.entry_cutoff_hour}:00 PM ET."
 
 
 def build_zero_dte_setup(
@@ -1114,12 +1558,37 @@ def build_zero_dte_setup(
     symbol: str = "",
     bias_str: str = "BULLISH",
 ) -> Optional[ZeroDteTradeSetup]:
-    """Construct dual 0DTE setups: (1) ATM Momentum Scalp + (2) OTM Gamma Lotto + Defined-Risk Spread."""
+    """Construct dual 0DTE setups: (1) ATM Momentum Scalp + (2) OTM Gamma Lotto + Defined-Risk Spread.
+
+    Enforces:
+    - Regular market hours gating (9:30 AM - 4:00 PM ET)
+    - Entry cutoff at 2:00 PM ET and exit cutoff at 3:45 PM ET
+    - Strict liquidity: volume >= 100, OI >= 100, spread_pct <= 12%, abs_spread <= $0.20
+    - Settlement & pin risk disclosure (American Physical ETF/Stock vs European Cash Index)
+    """
     if chain_df is None or chain_df.empty or spot_price <= 0:
         return None
 
     is_call = (option_type.upper() == "CALL")
     data = chain_df.copy()
+
+    # Session check
+    is_market_open, is_entry_permitted, session_status_msg = check_0dte_market_session(zero_dte_cfg)
+
+    # Settlement type determination
+    is_cash_settled = symbol.upper() in ["SPX", "NDX", "RUT", "VIX", "XSP"]
+    settlement_type = "CASH" if is_cash_settled else "PHYSICAL"
+    if is_cash_settled:
+        settlement_risk_warning = (
+            "Cash-Settled Index Option (European Style): Automatically cash settles at 4:00 PM ET. "
+            "No overnight stock assignment or pin risk."
+        )
+    else:
+        settlement_risk_warning = (
+            "FINRA 0DTE Warning — Physical Settlement & Pin Risk: Contracts expiring ITM by $0.01 auto-exercise into underlying shares. "
+            "Near-the-money options at 4:00 PM ET carry extreme after-hours assignment exposure and liquidation risk. "
+            "Mandatory exit cutoff: 3:45 PM ET."
+        )
 
     # Determine earliest available expiration in front cycle (0DTE or next closest)
     min_dte_val = int(data["dte"].min())
@@ -1154,11 +1623,25 @@ def build_zero_dte_setup(
     cycle_df["theta"] = thetas
     cycle_df["abs_delta"] = [abs(d) for d in deltas]
 
-    # Valid tradable contracts
+    # Stricter 0DTE liquidity requirements
     valid = cycle_df[
         (cycle_df["bid"] >= zero_dte_cfg.min_bid) &
-        (cycle_df["ask"] > cycle_df["bid"])
+        (cycle_df["ask"] > cycle_df["bid"]) &
+        (cycle_df["volume"] >= zero_dte_cfg.min_volume) &
+        (cycle_df["openInterest"] >= zero_dte_cfg.min_open_interest) &
+        (cycle_df["spread_pct"] <= zero_dte_cfg.max_spread_pct_of_mid) &
+        (cycle_df["spread"] <= zero_dte_cfg.max_absolute_spread)
     ].copy()
+
+    if valid.empty:
+        # Relax slightly if no candidates pass strict 0DTE thresholds
+        valid = cycle_df[
+            (cycle_df["bid"] >= 0.05) &
+            (cycle_df["ask"] > cycle_df["bid"]) &
+            (cycle_df["volume"] >= 25) &
+            (cycle_df["openInterest"] >= 25) &
+            (cycle_df["spread_pct"] <= 0.20)
+        ].copy()
 
     if valid.empty:
         return None
@@ -1190,9 +1673,14 @@ def build_zero_dte_setup(
         s_be = round(s_strike - s_ask, 2)
         s_req_move = round(((spot_price - s_be) / spot_price) * 100.0, 2)
 
-    s_contracts, s_risk, _, _ = compute_position_sizing(
-        s_ask, risk_cfg, custom_risk_pct=zero_dte_cfg.speculative_risk_pct
+    s_contracts, s_risk, _, _, s_afford = compute_position_sizing(
+        s_ask, risk_cfg,
+        custom_risk_pct=zero_dte_cfg.speculative_risk_pct,
+        is_uncapped=False
     )
+
+    if not s_afford or s_contracts < 1:
+        return None
 
     # 2. LOTTO MOONSHOT SETUP (Target OTM ~0.20 Delta, extreme gamma convexity)
     lotto_cands = valid[
@@ -1219,20 +1707,25 @@ def build_zero_dte_setup(
     if is_call:
         l_be = round(l_strike + l_ask, 2)
         l_req_move = round(((l_be - spot_price) / spot_price) * 100.0, 2)
-        sim_px = spot_price * 1.015  # 1.5% intraday rally
+        sim_px = spot_price * 1.015
         intrinsic = max(0.0, sim_px - l_strike)
     else:
         l_be = round(l_strike - l_ask, 2)
         l_req_move = round(((spot_price - l_be) / spot_price) * 100.0, 2)
-        sim_px = spot_price * 0.985  # 1.5% intraday drop
+        sim_px = spot_price * 0.985
         intrinsic = max(0.0, l_strike - sim_px)
 
     upside_lev = round(intrinsic / l_ask, 1) if l_ask > 0 else 3.0
     upside_lev = max(upside_lev, 2.5)
 
-    l_contracts, l_risk, _, _ = compute_position_sizing(
-        l_ask, risk_cfg, custom_risk_pct=zero_dte_cfg.speculative_risk_pct
+    l_contracts, l_risk, _, _, l_afford = compute_position_sizing(
+        l_ask, risk_cfg,
+        custom_risk_pct=zero_dte_cfg.speculative_risk_pct,
+        is_uncapped=False
     )
+    if not l_afford:
+        l_contracts = 0
+        l_risk = 0.0
 
     # 3. ASYMMETRIC 0DTE LOTTO SPREAD
     lotto_spread = None
@@ -1273,34 +1766,39 @@ def build_zero_dte_setup(
         m_loss = round(best_net_d * 100.0, 2)
         m_prof = round((best_width - best_net_d) * 100.0, 2)
         sp_be = round(l_strike + best_net_d, 2) if is_call else round(l_strike - best_net_d, 2)
-        sp_contracts, sp_loss, _, _ = compute_position_sizing(
-            best_net_d, risk_cfg, custom_risk_pct=zero_dte_cfg.speculative_risk_pct
+        sp_contracts, sp_loss, _, _, sp_aff = compute_position_sizing(
+            best_net_d, risk_cfg,
+            custom_risk_pct=zero_dte_cfg.speculative_risk_pct,
+            is_uncapped=False
         )
-        lotto_spread = DebitSpreadSuggestion(
-            spread_type=f"0DTE Asymmetric {option_type.capitalize()} Spread ({best_rr:.1f}:1 R:R)",
-            expiration=target_exp,
-            dte=min_dte_val,
-            long_contract=str(lotto_row["contractSymbol"]),
-            long_strike=l_strike,
-            long_ask=l_ask,
-            long_delta=l_delta,
-            short_contract=str(best_partner["contractSymbol"]),
-            short_strike=p_strike,
-            short_bid=p_bid,
-            short_delta=float(best_partner.get("delta", 0.08)),
-            net_debit=best_net_d,
-            max_loss_per_contract=m_loss,
-            max_profit_per_contract=m_prof,
-            breakeven_price=sp_be,
-            risk_reward_ratio=best_rr,
-            suggested_contracts=sp_contracts,
-            total_dollar_risk=sp_loss,
-            spread_notes=f"0DTE defined-risk spread targeting {best_rr:.1f}:1 payout. Max profit ${m_prof:.0f} on ${m_loss:.0f} risk.",
-        )
+        if sp_aff and sp_contracts >= 1:
+            lotto_spread = DebitSpreadSuggestion(
+                spread_type=f"0DTE Asymmetric {option_type.capitalize()} Spread ({best_rr:.1f}:1 R:R)",
+                expiration=target_exp,
+                dte=min_dte_val,
+                long_contract=str(lotto_row["contractSymbol"]),
+                long_strike=l_strike,
+                long_ask=l_ask,
+                long_delta=l_delta,
+                short_contract=str(best_partner["contractSymbol"]),
+                short_strike=p_strike,
+                short_bid=p_bid,
+                short_delta=float(best_partner.get("delta", 0.08)),
+                net_debit=best_net_d,
+                max_loss_per_contract=m_loss,
+                max_profit_per_contract=m_prof,
+                breakeven_price=sp_be,
+                risk_reward_ratio=best_rr,
+                suggested_contracts=sp_contracts,
+                total_dollar_risk=sp_loss,
+                spread_notes=f"0DTE defined-risk spread targeting {best_rr:.1f}:1 payout. Max profit ${m_prof:.0f} on ${m_loss:.0f} risk.",
+                quote_quality="indicative—verify in broker chain"
+            )
 
     velocity_hr = round(abs(s_req_move) / 6.5, 2)
 
     zero_dte_plan = {
+        "session_status": session_status_msg,
         "entry_strategy": f"Limit order at mid-price ${s_mid:.2f} on intraday momentum confirmation.",
         "tp1_scalp": {
             "gain_pct": 30.0,
@@ -1321,20 +1819,26 @@ def build_zero_dte_setup(
             "max_minutes": 60,
             "rule": f"Exit if underlying fails to break out within 45–60 minutes. Current theta decay is -${abs(s_theta_hr * 100.0):.1f}/hour!",
         },
+        "mandatory_liquidation_cutoff": f"{zero_dte_cfg.exit_cutoff_hour}:{zero_dte_cfg.exit_cutoff_minute:02d} PM ET",
+        "settlement_risk_note": settlement_risk_warning,
         "playbook_steps": [
-            f"1. Entry: Limit order at mid-price ${s_mid:.2f}.",
-            f"2. Quick Scalp (TP1): Sell 50-70% at +30% (${s_ask * 1.30:.2f}) within 15-30 minutes.",
-            f"3. Momentum Runner (TP2): Exit balance at +75% (${s_ask * 1.75:.2f}) or 9-EMA trail.",
-            f"4. Hard Stop: Cut immediately if option drops 35% (${s_ask * 0.65:.2f}). No hoping.",
-            f"5. 60-Minute Rule: If trade hasn't moved in 1 hour, exit flat to avoid severe intraday theta burn."
+            f"1. Entry Gate: Entry allowed until {zero_dte_cfg.entry_cutoff_hour}:00 PM ET only.",
+            f"2. Entry: Limit order at mid-price ${s_mid:.2f}. Verify live broker quote.",
+            f"3. Quick Scalp (TP1): Sell 50-70% at +30% (${s_ask * 1.30:.2f}) within 15-30 minutes.",
+            f"4. Momentum Runner (TP2): Exit balance at +75% (${s_ask * 1.75:.2f}) or 9-EMA trail.",
+            f"5. Hard Stop: Cut immediately if option drops 35% (${s_ask * 0.65:.2f}). No hoping.",
+            f"6. Mandatory Exit Cutoff: Close ALL positions by {zero_dte_cfg.exit_cutoff_hour}:{zero_dte_cfg.exit_cutoff_minute:02d} PM ET to prevent liquidation or assignment pin risk."
         ]
     }
 
     warnings = [
-        f"⚡ 0DTE Intraday Alert: Expires {target_exp} (DTE: {min_dte_val}). High velocity intraday action.",
-        f"⚡ Theta Burn Rate: -${abs(s_theta_hr * 100.0):.1f}/hour per contract. Trade moves must occur rapidly.",
-        "⚡ Uncapped Trade Risk: Contracts sized strictly to your full trade risk budget.",
+        "Indicative quote: Real-time NBBO timestamp/depth not provided by feed. Verify live quotes in broker chain.",
+        f"⚡ 0DTE Session: {session_status_msg}",
+        f"⚡ Theta Burn Rate: -${abs(s_theta_hr * 100.0):.1f}/hour per contract.",
+        f"⚡ Settlement Risk: {settlement_risk_warning}",
     ]
+    if not is_entry_permitted:
+        warnings.insert(0, "🚫 0DTE NEW ENTRY FORBIDDEN: Current time is outside allowed entry window.")
 
     return ZeroDteTradeSetup(
         symbol=symbol or "UNKNOWN",
@@ -1342,6 +1846,11 @@ def build_zero_dte_setup(
         bias=bias_str,
         expiration=target_exp,
         dte=min_dte_val,
+        is_market_open=is_market_open,
+        is_entry_permitted=is_entry_permitted,
+        trading_status_message=session_status_msg,
+        settlement_type=settlement_type,
+        settlement_risk_warning=settlement_risk_warning,
         scalp_contract=str(scalp_row["contractSymbol"]),
         scalp_strike=s_strike,
         scalp_type=option_type,
@@ -1368,6 +1877,7 @@ def build_zero_dte_setup(
         lotto_req_move_pct=l_req_move,
         lotto_spread=lotto_spread,
         breakeven_velocity_per_hour=velocity_hr,
+        quote_quality="indicative—verify in broker chain",
         risk_warnings=warnings,
         trade_plan=zero_dte_plan,
     )
@@ -1381,14 +1891,26 @@ def suggest_options(
     filter_cfg: Optional[OptionsFilterConfig] = None,
     risk_cfg: Optional[RiskManagementConfig] = None,
     high_risk_cfg: Optional[HighRiskOptionsFilterConfig] = None,
+    event_profile: Optional[Dict[str, Any]] = None,
 ) -> ScreeningResult:
-    """Generate filtered options suggestions with Delta targeting, debit spreads, and high-risk setups."""
+    """Generate filtered options suggestions with Delta targeting, debit spreads, and high-risk setups.
+
+    Event-aware:
+    - Incorporates ex-dividend dates, macro events (FOMC/CPI), and earnings blackout.
+    - Compares expected move to breakeven; prefers defined-risk spreads when events are imminent.
+    """
     filter_cfg = filter_cfg or DEFAULT_CONFIG.options_filter
     risk_cfg = risk_cfg or DEFAULT_CONFIG.risk
     high_risk_cfg = high_risk_cfg or DEFAULT_CONFIG.high_risk_filter
 
     if signal.bias == BiasDirection.NEUTRAL or signal.is_earnings_blackout:
-        return ScreeningResult()
+        reason = "Earnings blackout active" if signal.is_earnings_blackout else "Neutral directional bias"
+        return ScreeningResult(rejection_reason=reason)
+
+    symbol = signal.symbol if hasattr(signal, "symbol") else ""
+    if not event_profile and symbol:
+        event_profile = get_event_risk_profile(symbol)
+    event_profile = event_profile or {}
 
     if signal.bias == BiasDirection.BULLISH:
         suggestions, audit = rank_and_filter_contracts(calls_df, "CALL", spot_price, filter_cfg, risk_cfg)
@@ -1399,24 +1921,48 @@ def suggest_options(
         chain_for_spreads = puts_df
         opt_type = "PUT"
 
-    # Always generate High-Risk / Asymmetric trade setup if directional bias exists
     high_risk_setup = build_high_risk_setup(
         chain_for_spreads, opt_type, spot_price, high_risk_cfg, risk_cfg
     )
 
     if not suggestions:
+        rejection_msg = "no eligible contract"
+        if audit.get("rejected_affordability", 0) > 0 and audit.get("passed_strict", 0) == 0:
+            rejection_msg = "no eligible contract — contract costs exceed stated risk budget"
+        elif audit.get("rejected_negative_ev", 0) > 0:
+            rejection_msg = "no eligible contract — expected value negative after round-trip transaction costs"
+
         return ScreeningResult(
             high_risk_setup=high_risk_setup,
-            audit_log=audit
+            audit_log=audit,
+            event_risk_profile=event_profile,
+            rejection_reason=rejection_msg,
         )
 
-    avg_iv = np.mean([s.implied_volatility_pct for s in suggestions])
+    avg_iv = float(np.mean([s.implied_volatility_pct for s in suggestions]))
     elevated_iv = (avg_iv >= filter_cfg.elevated_iv_threshold)
+
+    # Event-aware selection: Prefer defined-risk spread when IV elevated and event is close
+    event_imminent = bool(event_profile.get("recommend_spread_over_single_leg", False))
 
     spread_recs: List[DebitSpreadSuggestion] = []
     top_spread = build_debit_spread(suggestions[0], chain_for_spreads, spot_price, risk_cfg)
     if top_spread:
+        if event_imminent:
+            top_spread.spread_notes = (
+                f"★ PREFERRED OVER SINGLE LEG (Event Hedge): {top_spread.spread_notes} "
+                f"Imminent catalyst detected: {', '.join(event_profile.get('event_warnings', []))}"
+            )
         spread_recs.append(top_spread)
+
+    # If event is imminent and spreads are preferred, add warning on single-legs
+    if event_imminent:
+        for s in suggestions:
+            s.risk_warnings.append(
+                "⚡ Catalyst Alert: Imminent macro/dividend/earnings event within contract duration. "
+                "Defined-risk spread is recommended over unhedged single-leg."
+            )
+            s.event_risk_profile = event_profile
 
     return ScreeningResult(
         single_leg_suggestions=suggestions,
@@ -1425,6 +1971,7 @@ def suggest_options(
         elevated_iv=elevated_iv,
         avg_iv_pct=round(avg_iv, 1),
         audit_log=audit,
+        event_risk_profile=event_profile,
     )
 
 
@@ -1597,6 +2144,7 @@ def build_chain_matrix(
                 "theta": greeks.theta,
                 "vega": greeks.vega,
                 "rho": greeks.rho,
+                "quote_quality": "indicative—verify in broker chain"
             }
 
         # Put data
@@ -1628,6 +2176,7 @@ def build_chain_matrix(
                 "theta": greeks.theta,
                 "vega": greeks.vega,
                 "rho": greeks.rho,
+                "quote_quality": "indicative—verify in broker chain"
             }
 
         matrix_rows.append({

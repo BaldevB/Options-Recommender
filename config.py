@@ -4,14 +4,14 @@ Enhanced with:
 - Dedicated 0DTE (Zero Days To Expiration) High-Velocity Universe (SPY, QQQ, IWM, NVDA, TSLA, etc.)
 - Dedicated AI Stock Ecosystem (40+ tickers across 7 sub-sectors)
 - Dedicated Commodities & Natural Resources Universe (Precious Metals, Energy, Copper, Agriculture, Uranium)
-- Dedicated High-Risk & Speculative Trade Setups (MSTR, COIN, ASTS, IONQ, etc.) with Uncapped Sizing
+- Dedicated High-Risk & Speculative Trade Setups (MSTR, COIN, ASTS, IONQ, etc.) with Guardrails
+- Hard Affordability Eligibility (no forced 1-contract recommendation; opt-in uncapped with caps)
+- Conservative Net Expectancy (modeled Ask entry, Bid exit, round-trip commissions, slippage)
+- Upgraded Liquidity Verification & Indicative Quote tagging
 - Multi-timeframe trend alignment thresholds
-- Volume confirmation settings
-- Earnings blackout window configuration
-- Strict delta targeting (0.30 - 0.55 for core, 0.15 - 0.28 for high-risk, 0.40 - 0.55 for 0DTE scalps)
-- Position sizing parameters with risk allocation
-- Implied Volatility threshold for debit spread alternatives
-- Rich categorized watchlists (100+ liquid US equities and ETFs)
+- Event-Aware Selection (earnings blackout, ex-dividend dates, macro FOMC/CPI, expected move vs breakeven)
+- Strict 0DTE Product Controls (regular market hours gating, 2:00 PM ET entry cutoff, 3:45 PM ET exit cutoff, FINRA pin risk)
+- Multi-scenario outcomes & Model-Implied N(d2) probability separation
 """
 
 from dataclasses import dataclass, field
@@ -110,6 +110,9 @@ ZERO_DTE_UNIVERSE: List[str] = [
     "SPY", "QQQ", "IWM", "NVDA", "TSLA", "AAPL", "AMD", "META", "AMZN", "MSFT"
 ]
 
+# Major Index Products with Macro Event Sensitivity
+INDEX_PRODUCTS: List[str] = ["SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "SMH"]
+
 # Flattened list of all unique tickers across standard watchlist & commodities
 EXPANDED_WATCHLIST: List[str] = list(dict.fromkeys(
     [ticker for tickers in WATCHLIST_CATEGORIES.values() for ticker in tickers] +
@@ -137,9 +140,12 @@ class TechnicalConfig:
 
 @dataclass
 class EarningsConfig:
-    """Earnings calendar blackout parameters."""
+    """Earnings calendar blackout and event parameters."""
     blackout_days: int = 8      # Strict blackout: block trades if earnings <= 8 days away
     warning_days: int = 14     # Warning banner: flag elevated IV risk if earnings <= 14 days
+    dividend_blackout_days: int = 3   # Ex-dividend blackout window
+    dividend_warning_days: int = 7    # Ex-dividend warning window
+    macro_warning_days: int = 2       # Macro risk warning window for index products
 
 
 @dataclass
@@ -152,13 +158,17 @@ class OptionsFilterConfig:
     # Expiration cycle: 14 to 45 Days to Expiration (DTE)
     min_dte: int = 14
     max_dte: int = 45
-    # Liquidity filters
+    # Strict Liquidity filters
     min_open_interest: int = 100
     min_volume: int = 25
     max_spread_pct_of_mid: float = 0.10  # Max 10% bid-ask spread
-    min_bid: float = 0.10               # Eliminate worthless contracts
+    max_absolute_spread: float = 0.50   # Max $0.50 absolute bid-ask spread
+    min_bid: float = 0.10               # Eliminate worthless / penny contracts
+    require_quote_freshness: bool = True
+    label_indicative_if_no_nbbo: bool = True # Label indicative if NBBO timestamp/size unavailable
     # Implied Volatility threshold to trigger Debit Spread suggestion
     elevated_iv_threshold: float = 45.0  # 45% IV
+    prefer_spread_when_event_close: bool = True # Prefer spread if IV elevated or event imminent
     top_n_suggestions: int = 5
     risk_free_rate: float = 0.045        # Risk-free interest rate (4.5%)
 
@@ -171,13 +181,17 @@ class HighRiskOptionsFilterConfig:
     min_open_interest: int = 50
     min_volume: int = 15
     max_spread_pct_of_mid: float = 0.18
+    max_absolute_spread: float = 0.75
     min_bid: float = 0.05
     # Out-of-the-money (OTM) asymmetric delta range: 0.15 to 0.28 delta
     min_delta: float = 0.15
     max_delta: float = 0.28
     target_delta: float = 0.22
-    # Uncapped risk budget (None uses standard trade risk allocation without arbitrary caps)
+    # Uncapped risk budget (opt-in only with maximum contracts and daily loss guardrails)
     speculative_risk_pct: Optional[float] = None
+    allow_uncapped: bool = False       # HARD RULE: Uncapped is strictly OPT-IN
+    max_contracts_cap: int = 25        # Hard guardrail on maximum contracts
+    max_daily_loss_budget: float = 500.0 # Hard daily loss ceiling ($)
     min_risk_reward_ratio: float = 2.5   # Minimum 2.5:1 R:R for lotto spreads
     risk_free_rate: float = 0.045        # Risk-free interest rate (4.5%)
 
@@ -187,6 +201,14 @@ class ZeroDteOptionsFilterConfig:
     """Screening filters for ultra-high velocity 0DTE (same-day / next-session) options."""
     min_dte: int = 0
     max_dte: int = 1
+    # Market Hours & Cutoff Guardrails (US Eastern Time)
+    enforce_market_hours: bool = True
+    market_open_hour: int = 9
+    market_open_minute: int = 30
+    entry_cutoff_hour: int = 14       # 2:00 PM ET strict entry cutoff
+    entry_cutoff_minute: int = 0
+    exit_cutoff_hour: int = 15        # 3:45 PM ET mandatory exit cutoff before market close
+    exit_cutoff_minute: int = 45
     # Scalp sweet-spot (ATM momentum scalp): ~0.45 to 0.55 Delta
     target_scalp_delta: float = 0.50
     min_scalp_delta: float = 0.38
@@ -195,12 +217,16 @@ class ZeroDteOptionsFilterConfig:
     target_lotto_delta: float = 0.20
     min_lotto_delta: float = 0.12
     max_lotto_delta: float = 0.28
-    # Liquidity filters (0DTE demands high volume)
-    min_volume: int = 50
-    min_open_interest: int = 50
-    max_spread_pct_of_mid: float = 0.20
-    min_bid: float = 0.05
-    # Uncapped risk budget (None uses standard trade risk allocation without arbitrary caps)
+    # Stricter Liquidity filters (0DTE demands high liquidity & tight spreads)
+    min_volume: int = 100
+    min_open_interest: int = 100
+    max_spread_pct_of_mid: float = 0.12
+    max_absolute_spread: float = 0.20
+    min_bid: float = 0.10
+    # Guardrails
+    allow_uncapped: bool = False       # Uncapped is opt-in only
+    max_contracts_cap: int = 20        # 0DTE contract cap
+    max_daily_loss_budget: float = 500.0 # 0DTE daily loss cap ($)
     speculative_risk_pct: Optional[float] = None
     min_risk_reward_ratio: float = 3.0   # Minimum 3:1 R:R for 0DTE lotto spreads
     risk_free_rate: float = 0.045
@@ -208,10 +234,21 @@ class ZeroDteOptionsFilterConfig:
 
 @dataclass
 class RiskManagementConfig:
-    """Position sizing and risk parameters."""
+    """Position sizing, affordability, friction, and risk parameters."""
     account_equity: float = 10000.0  # Default nominal account size ($)
     max_risk_pct: float = 0.01       # 1% max capital risk per trade
     stop_loss_pct: float = 0.50      # Practical stop loss at 50% option premium loss
+    # Hard Affordability Rule:
+    # If False, do NOT force 1 contract when risk exceeds budget; reject with "no eligible contract"
+    allow_unaffordable: bool = False
+    # Uncapped Opt-In & Guardrails:
+    allow_uncapped_speculative: bool = False # Uncapped is strictly OPT-IN
+    max_contracts_cap: int = 50              # Guardrail on contract count
+    max_daily_loss_budget: float = 500.0     # Guardrail on daily loss dollar budget
+    # Conservative Net Expectancy & Friction Modeling:
+    commission_per_contract: float = 0.65    # Round-trip commission ($0.65/side -> $1.30 round-trip)
+    slippage_pct: float = 0.02              # Modeled 2% execution slippage on premium
+    min_net_expectancy: float = 0.0         # Hard filter: Reject EV_net <= 0 after friction
 
 
 @dataclass
@@ -238,6 +275,7 @@ class AppConfig:
     high_risk_categories: Dict[str, List[str]] = field(default_factory=lambda: HIGH_RISK_CATEGORIES)
     high_risk_universe: List[str] = field(default_factory=lambda: HIGH_RISK_UNIVERSE)
     zero_dte_universe: List[str] = field(default_factory=lambda: ZERO_DTE_UNIVERSE)
+    index_products: List[str] = field(default_factory=lambda: INDEX_PRODUCTS)
     technicals: TechnicalConfig = field(default_factory=TechnicalConfig)
     earnings: EarningsConfig = field(default_factory=EarningsConfig)
     options_filter: OptionsFilterConfig = field(default_factory=OptionsFilterConfig)
