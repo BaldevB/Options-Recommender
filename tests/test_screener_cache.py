@@ -381,3 +381,47 @@ def test_analysis_package_exports():
     assert hasattr(analysis, "StockScreenerCache")
     assert hasattr(analysis, "get_screener_cache")
     assert hasattr(analysis, "fetch_single_stock_analysis")
+
+
+def test_screener_cache_strategy_filter():
+    from analysis.screener_cache import StockScreenerCache
+    cache = StockScreenerCache()
+    items = [
+        {
+            "symbol": "LEAD",
+            "name": "Market Leader",
+            "sector": "technology",
+            "score": 90.0,
+            "relative_strength_score": 88.0,
+            "distance_from_52w_high_pct": -1.5,
+            "strategy_tag": "RS_LEADER",
+            "ma_alignment": "FULL_BULLISH",
+            "rsi": 64.0,
+            "horizon": "SWING",
+            "action": "STRONG BUY",
+            "trade_plan": {"current_price": 150.0, "tp1_pct": 12.0},
+        },
+        {
+            "symbol": "DIP",
+            "name": "Dip Buy Co",
+            "sector": "healthcare",
+            "score": 65.0,
+            "relative_strength_score": 55.0,
+            "distance_from_52w_high_pct": -18.0,
+            "strategy_tag": "PULLBACK_DIP",
+            "ma_alignment": "ABOVE_50DMA",
+            "rsi": 38.0,
+            "horizon": "LONG_TERM",
+            "action": "BUY ACCUMULATE",
+            "trade_plan": {"current_price": 80.0, "tp1_pct": 18.0},
+        },
+    ]
+    cache._set_cached_items(items)
+
+    rs_res = cache.get_recommendations(strategy="rs_leaders")
+    assert rs_res["total"] == 1
+    assert rs_res["items"][0]["symbol"] == "LEAD"
+
+    dip_res = cache.get_recommendations(strategy="pullback")
+    assert dip_res["total"] == 1
+    assert dip_res["items"][0]["symbol"] == "DIP"

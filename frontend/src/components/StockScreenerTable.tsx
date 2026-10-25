@@ -79,6 +79,51 @@ export default function StockScreenerTable({
     );
   };
 
+  const getStrategyBadge = (tag?: string) => {
+    if (!tag) return <span className="text-slate-500 text-[11px]">—</span>;
+    const t = tag.toUpperCase();
+    if (t === "RS_LEADER") {
+      return (
+        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 whitespace-nowrap">
+          ⚡ RS Leader
+        </span>
+      );
+    }
+    if (t === "52W_BREAKOUT") {
+      return (
+        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 whitespace-nowrap">
+          🚀 Breakout
+        </span>
+      );
+    }
+    if (t === "GOLDEN_CROSS") {
+      return (
+        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40 whitespace-nowrap">
+          🌟 Cross
+        </span>
+      );
+    }
+    if (t === "PULLBACK_DIP") {
+      return (
+        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 whitespace-nowrap">
+          🎯 Dip Buy
+        </span>
+      );
+    }
+    if (t === "VOLUME_SURGE") {
+      return (
+        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-orange-500/20 text-orange-300 border border-orange-500/40 whitespace-nowrap">
+          🔥 Vol Surge
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-500/15 text-blue-300 border border-blue-500/30 whitespace-nowrap">
+        📈 Swing
+      </span>
+    );
+  };
+
   const getHorizonBadge = (horizon: string) => {
     const h = (horizon || "SWING").toUpperCase();
     if (h.includes("LONG")) {
@@ -96,27 +141,28 @@ export default function StockScreenerTable({
         <table className="w-full text-left text-xs text-slate-300">
           <thead className="border-b border-slate-800 bg-[#080d19] text-[11px] uppercase tracking-wider text-slate-400 font-semibold select-none">
             <tr>
-              <th scope="col" className="py-3 px-4 w-10"></th>
+              <th scope="col" className="py-3 px-3 w-8"></th>
               <th
                 scope="col"
-                className="py-3 px-4 cursor-pointer hover:text-cyan-400 transition-colors"
+                className="py-3 px-3 cursor-pointer hover:text-cyan-400 transition-colors"
                 onClick={() => onSort("symbol")}
               >
                 Ticker {renderSortIcon("symbol")}
               </th>
-              <th scope="col" className="py-3 px-4">Sector</th>
+              <th scope="col" className="py-3 px-3">Strategy</th>
+              <th scope="col" className="py-3 px-3">Sector</th>
               <th scope="col" className="py-3 px-3">Horizon</th>
               <th scope="col" className="py-3 px-3">Action</th>
               <th
                 scope="col"
-                className="py-3 px-4 text-right cursor-pointer hover:text-cyan-400 transition-colors"
+                className="py-3 px-3 text-right cursor-pointer hover:text-cyan-400 transition-colors"
                 onClick={() => onSort("price")}
               >
                 Price {renderSortIcon("price")}
               </th>
               <th
                 scope="col"
-                className="py-3 px-4 text-right cursor-pointer hover:text-cyan-400 transition-colors"
+                className="py-3 px-3 text-right cursor-pointer hover:text-cyan-400 transition-colors"
                 onClick={() => onSort("change_pct")}
               >
                 24h % {renderSortIcon("change_pct")}
@@ -124,20 +170,36 @@ export default function StockScreenerTable({
               <th
                 scope="col"
                 className="py-3 px-3 text-right cursor-pointer hover:text-cyan-400 transition-colors"
+                onClick={() => onSort("rs")}
+                title="Relative Strength Percentile vs Market (0-99)"
+              >
+                RS {renderSortIcon("rs")}
+              </th>
+              <th
+                scope="col"
+                className="py-3 px-3 text-right cursor-pointer hover:text-cyan-400 transition-colors"
+                onClick={() => onSort("dist_52w")}
+                title="Distance from 52-Week High"
+              >
+                52W Dist {renderSortIcon("dist_52w")}
+              </th>
+              <th
+                scope="col"
+                className="py-3 px-3 text-right cursor-pointer hover:text-cyan-400 transition-colors"
                 onClick={() => onSort("volume_ratio")}
               >
-                Vol Ratio {renderSortIcon("volume_ratio")}
+                Vol {renderSortIcon("volume_ratio")}
               </th>
               <th
                 scope="col"
                 className="py-3 px-3 text-right cursor-pointer hover:text-cyan-400 transition-colors"
                 onClick={() => onSort("rsi")}
               >
-                RSI (14) {renderSortIcon("rsi")}
+                RSI {renderSortIcon("rsi")}
               </th>
               <th
                 scope="col"
-                className="py-3 px-4 text-right cursor-pointer hover:text-cyan-400 transition-colors"
+                className="py-3 px-3 text-right cursor-pointer hover:text-cyan-400 transition-colors"
                 onClick={() => onSort("target_pct")}
               >
                 Target 1 {renderSortIcon("target_pct")}
@@ -163,7 +225,7 @@ export default function StockScreenerTable({
           <tbody className="divide-y divide-slate-800/60 font-medium">
             {stocks.length === 0 ? (
               <tr>
-                <td colSpan={14} className="py-12 text-center text-slate-500 text-sm">
+                <td colSpan={17} className="py-12 text-center text-slate-500 text-sm">
                   No stock recommendations match your filter criteria.
                 </td>
               </tr>
@@ -179,7 +241,7 @@ export default function StockScreenerTable({
                     className="hover:bg-slate-800/40 transition-colors duration-150 group"
                   >
                     {/* Star Button */}
-                    <td className="py-3 px-3 text-center">
+                    <td className="py-3 px-2 text-center">
                       {onToggleStar && (
                         <button
                           type="button"
@@ -197,20 +259,25 @@ export default function StockScreenerTable({
                     </td>
 
                     {/* Ticker & Name */}
-                    <td className="py-3 px-4">
+                    <td className="py-3 px-3">
                       <div className="flex flex-col">
                         <span className="font-mono font-bold text-slate-100 text-sm group-hover:text-cyan-300 transition-colors">
                           {stock.symbol}
                         </span>
-                        <span className="text-[11px] text-slate-400 line-clamp-1 max-w-[140px]" title={stock.name}>
+                        <span className="text-[11px] text-slate-400 line-clamp-1 max-w-[120px]" title={stock.name}>
                           {stock.name}
                         </span>
                       </div>
                     </td>
 
+                    {/* Strategy Tag */}
+                    <td className="py-3 px-3">
+                      {getStrategyBadge(stock.strategy_tag)}
+                    </td>
+
                     {/* Sector */}
-                    <td className="py-3 px-4">
-                      <span className="px-2 py-0.5 rounded text-[11px] bg-slate-800/80 text-slate-300 border border-slate-700/60">
+                    <td className="py-3 px-3">
+                      <span className="px-2 py-0.5 rounded text-[11px] bg-slate-800/80 text-slate-300 border border-slate-700/60 whitespace-nowrap">
                         {stock.sector}
                       </span>
                     </td>
@@ -222,12 +289,12 @@ export default function StockScreenerTable({
                     <td className="py-3 px-3">{getActionBadge(stock.action)}</td>
 
                     {/* Price */}
-                    <td className="py-3 px-4 text-right font-mono font-semibold text-slate-100">
+                    <td className="py-3 px-3 text-right font-mono font-semibold text-slate-100">
                       ${stock.price > 0 ? stock.price.toFixed(2) : "—"}
                     </td>
 
                     {/* 24h Change */}
-                    <td className="py-3 px-4 text-right font-mono font-semibold">
+                    <td className="py-3 px-3 text-right font-mono font-semibold">
                       <span
                         className={`inline-flex items-center gap-0.5 ${
                           isPositive ? "text-emerald-400" : "text-rose-400"
@@ -241,6 +308,44 @@ export default function StockScreenerTable({
                         {isPositive ? "+" : ""}
                         {stock.change_pct.toFixed(2)}%
                       </span>
+                    </td>
+
+                    {/* RS Rating */}
+                    <td className="py-3 px-3 text-right font-mono">
+                      {stock.relative_strength_score !== undefined ? (
+                        <span
+                          className={`font-bold px-1.5 py-0.5 rounded ${
+                            stock.relative_strength_score >= 80
+                              ? "text-cyan-300 bg-cyan-950/40 border border-cyan-800/40"
+                              : stock.relative_strength_score >= 60
+                              ? "text-emerald-300 bg-emerald-950/40 border border-emerald-800/40"
+                              : "text-slate-400"
+                          }`}
+                        >
+                          {Math.round(stock.relative_strength_score)}
+                        </span>
+                      ) : (
+                        <span className="text-slate-500">—</span>
+                      )}
+                    </td>
+
+                    {/* 52W High Distance */}
+                    <td className="py-3 px-3 text-right font-mono">
+                      {stock.distance_from_52w_high_pct !== undefined ? (
+                        <span
+                          className={`text-[11px] ${
+                            stock.distance_from_52w_high_pct >= -3.0
+                              ? "text-amber-400 font-bold"
+                              : "text-slate-400"
+                          }`}
+                        >
+                          {stock.distance_from_52w_high_pct >= -0.1
+                            ? "HIGH"
+                            : `${stock.distance_from_52w_high_pct.toFixed(1)}%`}
+                        </span>
+                      ) : (
+                        <span className="text-slate-500">—</span>
+                      )}
                     </td>
 
                     {/* Volume Ratio */}
@@ -272,7 +377,7 @@ export default function StockScreenerTable({
                     </td>
 
                     {/* Target 1 */}
-                    <td className="py-3 px-4 text-right font-mono">
+                    <td className="py-3 px-3 text-right font-mono">
                       <div className="flex flex-col items-end">
                         <span className="font-bold text-emerald-300">
                           ${plan.tp1 ? plan.tp1.toFixed(2) : "—"}

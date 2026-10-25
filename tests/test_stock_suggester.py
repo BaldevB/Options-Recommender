@@ -234,6 +234,34 @@ def test_stock_recommendation_with_dict_quote():
     assert len(rec.rationale) > 0
 
 
+def test_stock_selection_institutional_metrics():
+    # Construct a historical dataframe with an upward trend
+    dates = pd.date_range("2024-01-01", periods=60, freq="B")
+    prices = [100.0 + i * 1.5 for i in range(60)]
+    df = pd.DataFrame({
+        "Open": prices,
+        "High": [p + 2.0 for p in prices],
+        "Low": [p - 1.0 for p in prices],
+        "Close": prices,
+        "Volume": [1000000] * 60,
+    }, index=dates)
+
+    momentum = _make_dummy_momentum(symbol="TSLA", last_close=float(prices[-1]), momentum_score=0.6)
+    rec = generate_stock_recommendation(
+        symbol="TSLA",
+        momentum=momentum,
+        df=df,
+    )
+
+    assert hasattr(rec, "relative_strength_score")
+    assert 1.0 <= rec.relative_strength_score <= 99.0
+    assert hasattr(rec, "distance_from_52w_high_pct")
+    assert rec.distance_from_52w_high_pct <= 0.0
+    assert hasattr(rec, "ma_alignment")
+    assert hasattr(rec, "strategy_tag")
+    assert rec.strategy_tag in ("RS_LEADER", "52W_BREAKOUT", "GOLDEN_CROSS", "PULLBACK_DIP", "VOLUME_SURGE", "MOMENTUM_SWING")
+
+
 def test_analysis_package_level_exports():
     import analysis
     assert hasattr(analysis, "TradeHorizon")

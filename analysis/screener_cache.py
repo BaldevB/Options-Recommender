@@ -1,8 +1,8 @@
 """High-speed in-memory Screener Cache & Intraday Background Refresh Manager.
 
 Maintains thread-safe pre-computed stock recommendations across 1,000+ US equities,
-supporting sub-second multi-parameter filtering (horizon, sector, search), multi-column
-sorting, pagination, on-demand deep-dive analysis, and background batch refreshes.
+supporting sub-second multi-parameter filtering (horizon, sector, search, strategy),
+multi-column sorting, pagination, on-demand deep-dive analysis, and background batch refreshes.
 """
 
 from dataclasses import asdict
@@ -71,6 +71,14 @@ def recommendation_to_dict(
             d["price"] = d["trade_plan"].get("current_price", 0.0)
         if "target_pct" not in d and "trade_plan" in d and isinstance(d["trade_plan"], dict):
             d["target_pct"] = d["trade_plan"].get("tp1_pct", 0.0)
+        if "relative_strength_score" not in d:
+            d["relative_strength_score"] = float(d.get("relative_strength", 50.0))
+        if "distance_from_52w_high_pct" not in d:
+            d["distance_from_52w_high_pct"] = float(d.get("dist_52w_pct", 0.0))
+        if "ma_alignment" not in d:
+            d["ma_alignment"] = str(d.get("ma_structure", "NEUTRAL"))
+        if "strategy_tag" not in d:
+            d["strategy_tag"] = str(d.get("strategy", "MOMENTUM_SWING"))
         return d
 
     plan = rec.trade_plan
@@ -102,6 +110,11 @@ def recommendation_to_dict(
 
     horizon_val = rec.horizon.value if hasattr(rec.horizon, "value") else str(rec.horizon)
 
+    rs_score = getattr(rec, "relative_strength_score", 50.0)
+    dist_52w = getattr(rec, "distance_from_52w_high_pct", 0.0)
+    ma_align = getattr(rec, "ma_alignment", "NEUTRAL")
+    strat = getattr(rec, "strategy_tag", "MOMENTUM_SWING")
+
     return {
         "symbol": rec.symbol,
         "name": rec.name,
@@ -120,6 +133,10 @@ def recommendation_to_dict(
         "volume_ratio": round(volume_ratio, 2),
         "rsi": round(rsi, 1),
         "target_pct": plan.tp1_pct,
+        "relative_strength_score": round(float(rs_score), 1),
+        "distance_from_52w_high_pct": round(float(dist_52w), 1),
+        "ma_alignment": ma_align,
+        "strategy_tag": strat,
     }
 
 
@@ -197,6 +214,7 @@ class StockScreenerCache:
         self,
         horizon: Optional[str] = None,
         sector: Optional[str] = None,
+        strategy: Optional[str] = None,
         search: Optional[str] = None,
         sort_by: str = "score",
         limit: int = 50,
@@ -207,6 +225,7 @@ class StockScreenerCache:
         Args:
             horizon: Filter by timeframe horizon ('ALL', 'SWING', 'LONG_TERM', 'BREAKOUT').
             sector: Filter by sector slug or human-readable name.
+            strategy: Preset strategy filter ('rs_leaders', 'breakouts', 'golden_cross', 'pullback').
             search: Ticker symbol or company name search substring.
             sort_by: Sorting field ('score', 'symbol', 'price', 'change_pct', 'volume_ratio', 'rsi', etc.).
             limit: Page size limit (default 50).
@@ -229,6 +248,11 @@ class StockScreenerCache:
         # Parse sector filter
         s_norm = normalize_sector_query(sector)
 
+        # Parse strategy filter
+        strat_norm = strategy.strip().lower() if strategy else None
+        if strat_norm in ("all", "", "none"):
+            strat_norm = None
+
         # Parse search query
         q_norm = search.strip().lower() if search else None
 
@@ -250,7 +274,28 @@ class StockScreenerCache:
                 if item_sec != s_norm and item.get("sector", "").lower() != (sector or "").strip().lower():
                     continue
 
-            # 3. Search query
+            # 3. Strategy filter
+            if strat_norm is not None:
+                tag = item.get("strategy_tag", "").lower()
+                rs = item.get("relative_strength_score", 50.0)
+                d52 = item.get("distance_from_52w_high_pct", -50.0)
+                ma = item.get("ma_alignment", "").upper()
+                rsi_val = item.get("rsi", 50.0)
+
+                if strat_norm in ("rs_leaders", "rs", "relative_strength"):
+                    if not (tag == "rs_leader" or rs >= 75.0):
+                        continue
+                elif strat_norm in ("breakouts", "52w_breakouts", "breakout"):
+                    if not (tag == "52w_breakout" or d52 >= -7.0):
+                        continue
+                elif strat_norm in ("golden_cross", "golden"):
+                    if not (tag == "golden_cross" or "GOLDEN" in ma or "BULLISH" in ma):
+                        continue
+                elif strat_norm in ("pullback", "pullback_dips", "dip_buy", "dips"):
+                    if not (tag == "pullback_dip" or rsi_val <= 45.0):
+                        continue
+
+            # 4. Search query
             if q_norm is not None:
                 sym_match = q_norm in item.get("symbol", "").lower()
                 name_match = q_norm in item.get("name", "").lower()
@@ -279,6 +324,10 @@ class StockScreenerCache:
             filtered.sort(key=lambda x: x.get("trade_plan", {}).get("risk_reward_ratio", 1.5), reverse=True)
         elif sort_field in ("target_pct", "target", "tp1_pct"):
             filtered.sort(key=lambda x: x.get("target_pct", 0.0), reverse=True)
+        elif sort_field in ("rs", "relative_strength", "alpha", "rs_score"):
+            filtered.sort(key=lambda x: x.get("relative_strength_score", 50.0), reverse=True)
+        elif sort_field in ("dist_52w", "distance_52w", "52w_high"):
+            filtered.sort(key=lambda x: x.get("distance_from_52w_high_pct", -100.0), reverse=True)
         else:
             filtered.sort(key=lambda x: x.get("score", 0.0), reverse=True)
 
@@ -296,14 +345,7 @@ class StockScreenerCache:
         }
 
     def get_analysis(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Retrieve full deep dive analysis for a symbol from cache or on-demand scan.
-
-        Args:
-            symbol: Ticker symbol (e.g. 'NVDA')
-
-        Returns:
-            Dictionary with trade plan, scoring, and indicators, or None if unavailable.
-        """
+        """Retrieve full deep dive analysis for a symbol from cache or on-demand scan."""
         sym = symbol.strip().upper()
         with self._lock:
             if sym in self._cached_dict:
@@ -314,19 +356,19 @@ class StockScreenerCache:
         if analysis:
             with self._lock:
                 self._cached_dict[sym] = analysis
-            return dict(analysis)
-
+            return analysis
         return None
 
     def get_status(self) -> Dict[str, Any]:
-        """Return cache health, stock counts, refresh timestamps, and worker status."""
+        """Get screener cache status, counts, and background worker state."""
         with self._lock:
             return {
                 "status": self._status,
-                "last_updated": self._last_updated,
                 "cached_stocks": len(self._cached_items),
                 "total_stocks": len(get_stock_universe()),
+                "total_universe": len(get_stock_universe()),
                 "is_refreshing": self._is_refreshing,
+                "last_updated": self._last_updated,
                 "next_refresh": self._next_refresh,
                 "worker_running": self._worker_thread is not None and self._worker_thread.is_alive(),
             }
@@ -337,16 +379,7 @@ class StockScreenerCache:
         tickers: Optional[List[str]] = None,
         chunk_size: int = 100,
     ) -> Dict[str, Any]:
-        """Perform batch historical price downloads, compute momentum & trade plans, and refresh cache.
-
-        Args:
-            force: Force refresh even if a refresh is currently marked active.
-            tickers: Optional list of tickers to scan (defaults to entire stock universe).
-            chunk_size: Number of tickers per batch yfinance request.
-
-        Returns:
-            Status summary dictionary.
-        """
+        """Perform batch historical price downloads, compute momentum & trade plans, and refresh cache."""
         with self._lock:
             if self._is_refreshing and not force:
                 return {
@@ -423,6 +456,7 @@ class StockScreenerCache:
                             "change_percent": round(change_percent, 2),
                             "day_high": float(df_sym["High"].iloc[-1]),
                             "day_low": float(df_sym["Low"].iloc[-1]),
+                            "fifty_two_week_high": float(df_sym["High"].max()),
                             "volume": int(df_sym["Volume"].iloc[-1]),
                             "valid": True,
                         }
@@ -506,10 +540,8 @@ class StockScreenerCache:
                 logger.error("Error in screener cache background refresh: %s", exc)
 
             sleep_secs = max(10, self._worker_interval_minutes * 60)
-            for _ in range(sleep_secs):
-                if self._stop_worker_event.is_set():
-                    break
-                time.sleep(1.0)
+            if self._stop_worker_event.wait(timeout=sleep_secs):
+                break
 
 
 _GLOBAL_SCREENER_CACHE: Optional[StockScreenerCache] = None
@@ -519,8 +551,7 @@ _GLOBAL_CACHE_LOCK = threading.Lock()
 def get_screener_cache() -> StockScreenerCache:
     """Retrieve or initialize the global thread-safe StockScreenerCache singleton."""
     global _GLOBAL_SCREENER_CACHE
-    if _GLOBAL_SCREENER_CACHE is None:
-        with _GLOBAL_CACHE_LOCK:
-            if _GLOBAL_SCREENER_CACHE is None:
-                _GLOBAL_SCREENER_CACHE = StockScreenerCache()
-    return _GLOBAL_SCREENER_CACHE
+    with _GLOBAL_CACHE_LOCK:
+        if _GLOBAL_SCREENER_CACHE is None:
+            _GLOBAL_SCREENER_CACHE = StockScreenerCache()
+        return _GLOBAL_SCREENER_CACHE

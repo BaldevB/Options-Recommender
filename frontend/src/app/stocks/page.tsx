@@ -73,10 +73,12 @@ function StockRecommendationsContent() {
   // URL Query Params
   const initialSymbol = searchParams.get("symbol") || searchParams.get("ticker") || "";
   const initialHorizon = searchParams.get("horizon") || "ALL";
+  const initialStrategy = searchParams.get("strategy") || "ALL";
 
   // Navigation & View mode
   const [viewMode, setViewMode] = useState<"grid" | "table">("grid");
   const [activeHorizon, setActiveHorizon] = useState<string>(initialHorizon);
+  const [activeStrategy, setActiveStrategy] = useState<string>(initialStrategy);
   const [selectedSector, setSelectedSector] = useState<string>("ALL");
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [sortBy, setSortBy] = useState<string>("score");
@@ -199,6 +201,9 @@ function StockRecommendationsContent() {
       if (activeHorizon && activeHorizon !== "ALL") {
         params.set("horizon", activeHorizon);
       }
+      if (activeStrategy && activeStrategy !== "ALL") {
+        params.set("strategy", activeStrategy);
+      }
       if (selectedSector && selectedSector !== "ALL") {
         params.set("sector", selectedSector);
       }
@@ -226,7 +231,7 @@ function StockRecommendationsContent() {
       setLoading(false);
       fetchStatus();
     }
-  }, [activeHorizon, selectedSector, searchQuery, sortBy, fetchStatus]);
+  }, [activeHorizon, activeStrategy, selectedSector, searchQuery, sortBy, fetchStatus]);
 
   useEffect(() => {
     fetchRecommendations();
@@ -444,13 +449,13 @@ function StockRecommendationsContent() {
 
       {/* Main Container */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 space-y-6">
-        {/* Horizon Tabs & Filter Toolbar */}
-        <div className="flex flex-col gap-4 bg-[#0a101f] border border-slate-800/80 rounded-2xl p-4 shadow-xl">
+        {/* Horizon Tabs, Strategy Presets & Filter Toolbar */}
+        <div className="flex flex-col gap-3.5 bg-[#0a101f] border border-slate-800/80 rounded-2xl p-4 shadow-xl">
           {/* Horizon Tabs */}
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/70 pb-3">
             <div className="flex flex-wrap items-center gap-1 sm:gap-2">
               {[
-                { id: "ALL", label: "All Picks", icon: Compass },
+                { id: "ALL", label: "All Horizons", icon: Compass },
                 { id: "SWING", label: "⚡ Swing Momentum (2-6w)", icon: Zap },
                 { id: "LONG_TERM", label: "💎 Long-Term Conviction (3-12m)", icon: Sparkles },
                 { id: "BREAKOUT", label: "🚀 Breakout Volume (>1.2x)", icon: Flame },
@@ -506,8 +511,45 @@ function StockRecommendationsContent() {
             </div>
           </div>
 
+          {/* Strategy Preset Filters */}
+          <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+            <span className="text-[11px] font-semibold text-slate-400 mr-1 flex items-center gap-1">
+              <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+              Strategy:
+            </span>
+            {[
+              { id: "ALL", label: "All Strategies" },
+              { id: "rs_leaders", label: "⚡ RS Leaders (RS ≥ 75)", highlight: "cyan" },
+              { id: "breakouts", label: "🚀 52W Breakouts (< 5%)", highlight: "amber" },
+              { id: "golden_cross", label: "🌟 Golden Cross", highlight: "purple" },
+              { id: "pullback", label: "🎯 Pullback Dips", highlight: "emerald" },
+            ].map((strat) => {
+              const isActive = activeStrategy === strat.id;
+              return (
+                <button
+                  key={strat.id}
+                  type="button"
+                  onClick={() => setActiveStrategy(strat.id)}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
+                    isActive
+                      ? strat.highlight === "amber"
+                        ? "bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-[0_0_12px_rgba(245,158,11,0.25)] font-bold"
+                        : strat.highlight === "purple"
+                        ? "bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-[0_0_12px_rgba(168,85,247,0.25)] font-bold"
+                        : strat.highlight === "emerald"
+                        ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-[0_0_12px_rgba(16,185,129,0.25)] font-bold"
+                        : "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-[0_0_12px_rgba(6,182,212,0.25)] font-bold"
+                      : "bg-slate-900/60 text-slate-400 hover:text-slate-200 hover:bg-slate-800/80 border border-slate-800"
+                  }`}
+                >
+                  {strat.label}
+                </button>
+              );
+            })}
+          </div>
+
           {/* Search, Sector, and Sort Controls Bar */}
-          <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-800/60">
             <div className="flex flex-wrap items-center gap-3 flex-1 min-w-[280px]">
               {/* Search Bar */}
               <div className="relative flex-1 min-w-[220px] max-w-md">
@@ -556,6 +598,8 @@ function StockRecommendationsContent() {
                 className="rounded-xl bg-slate-900 border border-slate-700/80 px-3 py-1.5 text-xs text-slate-200 focus:border-cyan-500 focus:outline-none cursor-pointer"
               >
                 <option value="score">Quant Score (Highest)</option>
+                <option value="rs">Relative Strength (RS Rating)</option>
+                <option value="dist_52w">Distance to 52W High (Closest)</option>
                 <option value="change_pct">24h Gain (%)</option>
                 <option value="volume_ratio">Volume Breakout</option>
                 <option value="target_pct">Target Gain (TP1 %)</option>
@@ -659,6 +703,7 @@ function StockRecommendationsContent() {
               type="button"
               onClick={() => {
                 setActiveHorizon("ALL");
+                setActiveStrategy("ALL");
                 setSelectedSector("ALL");
                 setSearchQuery("");
               }}
@@ -705,7 +750,7 @@ function StockRecommendationsContent() {
                   <Target className="w-5 h-5" />
                 </div>
                 <div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <h2 className="text-xl font-black font-mono tracking-wider text-slate-100">
                       {deepDiveStock.symbol}
                     </h2>
@@ -715,6 +760,11 @@ function StockRecommendationsContent() {
                     <span className="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-medium">
                       {deepDiveStock.sector}
                     </span>
+                    {deepDiveStock.strategy_tag && (
+                      <span className="text-xs px-2 py-0.5 rounded font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+                        {deepDiveStock.strategy_tag.replace(/_/g, " ")}
+                      </span>
+                    )}
                   </div>
                   <p className="text-xs text-slate-400 mt-0.5">{deepDiveStock.name}</p>
                 </div>
@@ -794,15 +844,21 @@ function StockRecommendationsContent() {
 
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs pt-1">
                   <div className="p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/80">
-                    <span className="text-[10px] text-slate-400 uppercase block">Risk:Reward</span>
-                    <span className="font-mono font-bold text-emerald-400">
-                      1 : {deepDiveStock.trade_plan.risk_reward_ratio.toFixed(2)} R:R
+                    <span className="text-[10px] text-slate-400 uppercase block">Relative Strength</span>
+                    <span className="font-mono font-bold text-cyan-300">
+                      {deepDiveStock.relative_strength_score !== undefined
+                        ? `RS ${Math.round(deepDiveStock.relative_strength_score)}/99`
+                        : "—"}
                     </span>
                   </div>
                   <div className="p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/80">
-                    <span className="text-[10px] text-slate-400 uppercase block">Target 2 (TP2)</span>
-                    <span className="font-mono font-bold text-emerald-300">
-                      ${deepDiveStock.trade_plan.tp2.toFixed(2)} (+{deepDiveStock.trade_plan.tp2_pct.toFixed(1)}%)
+                    <span className="text-[10px] text-slate-400 uppercase block">52W High Distance</span>
+                    <span className="font-mono font-bold text-amber-300">
+                      {deepDiveStock.distance_from_52w_high_pct !== undefined
+                        ? deepDiveStock.distance_from_52w_high_pct >= -0.1
+                          ? "AT HIGH"
+                          : `${deepDiveStock.distance_from_52w_high_pct.toFixed(1)}%`
+                        : "—"}
                     </span>
                   </div>
                   <div className="p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/80">

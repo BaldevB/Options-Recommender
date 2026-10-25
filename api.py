@@ -1021,6 +1021,7 @@ async def post_paper_quotes_endpoint(request: Request):
 def get_stock_recommendations_endpoint(
     horizon: Optional[str] = None,
     sector: Optional[str] = None,
+    strategy: Optional[str] = None,
     search: Optional[str] = None,
     sort_by: str = "score",
     limit: int = 50,
@@ -1031,6 +1032,7 @@ def get_stock_recommendations_endpoint(
     res = cache.get_recommendations(
         horizon=horizon,
         sector=sector,
+        strategy=strategy,
         search=search,
         sort_by=sort_by,
         limit=limit,

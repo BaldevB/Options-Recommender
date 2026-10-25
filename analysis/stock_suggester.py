@@ -3,6 +3,12 @@
 Calculates actionable trade plans (Entry Zone, TP1, TP2, Stop Loss, Risk-Reward ratio),
 classifies trade horizon (SWING vs LONG_TERM), evaluates overall composite score, and
 determines risk-based integer share position sizing for 1,000+ US equities.
+
+Enhanced with institutional stock selection factors:
+- Relative Strength (RS) percentile rating (vs benchmark)
+- Distance from 52-Week High (%) & Breakout detection
+- Multi-Moving-Average structural alignment (Full Bullish, Golden Cross, Pullback)
+- Strategy preset tagging (RS_LEADER, 52W_BREAKOUT, GOLDEN_CROSS, PULLBACK_DIP, MOMENTUM_SWING)
 """
 
 from dataclasses import dataclass, field
@@ -52,6 +58,10 @@ class StockRecommendation:
     sentiment_score: float
     trade_plan: StockTradePlan
     rationale: List[str] = field(default_factory=list)
+    relative_strength_score: float = 50.0
+    distance_from_52w_high_pct: float = 0.0
+    ma_alignment: str = "NEUTRAL"
+    strategy_tag: str = "MOMENTUM_SWING"
 
 
 def calculate_atr(
@@ -99,6 +109,108 @@ def calculate_atr(
     return round(max(0.50, current_price * 0.025), 2)
 
 
+def evaluate_relative_strength(
+    df: Optional[pd.DataFrame] = None,
+    mom_score: float = 0.0,
+    current_price: float = 100.0,
+) -> float:
+    """Evaluate institutional relative strength score (0.0 to 99.0) vs broader market benchmark."""
+    if df is not None and not df.empty and len(df) >= 15:
+        try:
+            close_series = df["Close"]
+            cur = float(close_series.iloc[-1])
+            # 20-day return
+            lookback_20 = min(len(close_series) - 1, 20)
+            p_20 = float(close_series.iloc[-lookback_20])
+            ret_20d = (cur - p_20) / p_20 if p_20 > 0 else 0.0
+
+            # 60-day return
+            lookback_60 = min(len(close_series) - 1, 60)
+            p_60 = float(close_series.iloc[-lookback_60])
+            ret_60d = (cur - p_60) / p_60 if p_60 > 0 else ret_20d
+
+            # Base score centering at 50, rewarding outperformance
+            rs = 50.0 + (ret_20d * 120.0) + (ret_60d * 40.0) + (mom_score * 15.0)
+            return round(max(1.0, min(99.0, rs)), 1)
+        except Exception:
+            pass
+
+    # Baseline calculation from momentum score
+    rs_fallback = 50.0 + (mom_score * 35.0)
+    return round(max(1.0, min(99.0, rs_fallback)), 1)
+
+
+def evaluate_ma_structure(
+    df: Optional[pd.DataFrame] = None,
+    current_price: float = 100.0,
+    momentum: Optional[MomentumResult] = None,
+) -> str:
+    """Determine moving average structure (FULL_BULLISH, GOLDEN_CROSS, PULLBACK_SUPPORT, BEARISH, NEUTRAL)."""
+    sma_20 = getattr(momentum, "sma_20", None) if momentum else None
+    sma_50 = getattr(momentum, "sma_50", None) if momentum else None
+    sma_200 = getattr(momentum, "sma_200", None) if momentum else None
+
+    if df is not None and not df.empty and len(df) >= 20:
+        try:
+            closes = df["Close"]
+            if sma_20 is None and len(closes) >= 20:
+                sma_20 = float(closes.rolling(20).mean().iloc[-1])
+            if sma_50 is None and len(closes) >= 50:
+                sma_50 = float(closes.rolling(50).mean().iloc[-1])
+            if sma_200 is None and len(closes) >= 200:
+                sma_200 = float(closes.rolling(200).mean().iloc[-1])
+        except Exception:
+            pass
+
+    if sma_50 and sma_200 and sma_50 > sma_200:
+        if sma_20 and current_price > sma_20 > sma_50:
+            return "FULL_BULLISH"
+        return "GOLDEN_CROSS"
+
+    if sma_20 and sma_50 and current_price > sma_20 > sma_50:
+        return "BULLISH_TREND"
+
+    if sma_50 and current_price > sma_50:
+        return "ABOVE_50DMA"
+
+    if sma_200 and current_price < sma_200:
+        return "BELOW_200DMA"
+
+    return "NEUTRAL"
+
+
+def evaluate_strategy_tag(
+    relative_strength: float,
+    dist_52w_pct: float,
+    ma_alignment: str,
+    rsi: float,
+    volume_ratio: float,
+    mom_score: float,
+) -> str:
+    """Classify the primary high-confidence stock selection strategy."""
+    # 52-Week High Breakout
+    if dist_52w_pct >= -7.0 and volume_ratio >= 1.20 and mom_score > 0.15:
+        return "52W_BREAKOUT"
+
+    # Relative Strength Market Leader
+    if relative_strength >= 78.0 and mom_score > 0.10:
+        return "RS_LEADER"
+
+    # Golden Cross Momentum
+    if ma_alignment in ("FULL_BULLISH", "GOLDEN_CROSS") and mom_score > 0.20:
+        return "GOLDEN_CROSS"
+
+    # Pullback / Dip Buy into Moving Average Support
+    if rsi <= 44.0 and mom_score >= -0.20 and ma_alignment != "BELOW_200DMA":
+        return "PULLBACK_DIP"
+
+    # Volume Breakout
+    if volume_ratio >= 1.40 and mom_score > 0.10:
+        return "VOLUME_SURGE"
+
+    return "MOMENTUM_SWING"
+
+
 def classify_trade_horizon(
     momentum: Optional[MomentumResult] = None,
     beta: Optional[float] = None,
@@ -118,7 +230,7 @@ def classify_trade_horizon(
         return explicit_horizon
 
     if beta is not None:
-        # Low beta (< 1.15) with aligned weekly trend suggests steady investment
+        # Low beta (<= 1.15) with aligned weekly trend suggests steady investment
         if beta <= 1.15:
             if momentum and (momentum.multi_timeframe_aligned or momentum.weekly_trend == "BULLISH"):
                 return TradeHorizon.LONG_TERM
@@ -315,25 +427,7 @@ def generate_stock_recommendation(
     earnings_info: Optional[Dict[str, Any]] = None,
     **kwargs,
 ) -> StockRecommendation:
-    """Generate a quantitative stock recommendation with actionable trade plan and scoring.
-
-    Args:
-        target: Optional primary argument (symbol, quote, or momentum).
-        *args: Variable positional arguments for flexible invocation.
-        symbol: Ticker symbol (e.g. 'NVDA').
-        quote: QuoteData or quote dict.
-        momentum: MomentumResult from analysis.momentum.
-        sentiment: SentimentResult from analysis.sentiment.
-        df: Price history dataframe for ATR calculation.
-        beta: Volatility beta.
-        sector: Sector category.
-        name: Company name.
-        horizon: Desired TradeHorizon (SWING / LONG_TERM).
-        earnings_info: Earnings calendar info.
-
-    Returns:
-        StockRecommendation
-    """
+    """Generate a quantitative stock recommendation with actionable trade plan and scoring."""
     # Parse positional arguments dynamically
     all_args = [target] + list(args) if target is not None else list(args)
     for a in all_args:
@@ -395,6 +489,7 @@ def generate_stock_recommendation(
     day_high = 0.0
     day_low = 0.0
     quote_beta = None
+    fifty_two_week_high = 0.0
 
     if quote is not None:
         if isinstance(quote, QuoteData):
@@ -402,11 +497,13 @@ def generate_stock_recommendation(
             day_high = quote.day_high
             day_low = quote.day_low
             quote_beta = quote.beta
+            fifty_two_week_high = getattr(quote, "fifty_two_week_high", 0.0)
         elif isinstance(quote, dict):
             current_price = float(quote.get("current_price", 0.0))
             day_high = float(quote.get("day_high", 0.0))
             day_low = float(quote.get("day_low", 0.0))
             quote_beta = quote.get("beta")
+            fifty_two_week_high = float(quote.get("fifty_two_week_high", 0.0))
 
     if current_price <= 0.0 and momentum is not None:
         current_price = momentum.last_close
@@ -416,6 +513,15 @@ def generate_stock_recommendation(
 
     if current_price <= 0.0:
         current_price = 100.0
+
+    if fifty_two_week_high <= 0.0 and df is not None and not df.empty:
+        try:
+            fifty_two_week_high = float(df["High"].max())
+        except Exception:
+            fifty_two_week_high = current_price * 1.05
+
+    if fifty_two_week_high <= 0.0:
+        fifty_two_week_high = current_price * 1.05
 
     if beta is None and quote_beta is not None:
         try:
@@ -441,6 +547,23 @@ def generate_stock_recommendation(
     else:
         blended = mom_score
 
+    # Advanced selection metrics
+    relative_strength = evaluate_relative_strength(df=df, mom_score=mom_score, current_price=current_price)
+    dist_52w_pct = round(((current_price - fifty_two_week_high) / fifty_two_week_high) * 100.0, 1)
+    ma_alignment = evaluate_ma_structure(df=df, current_price=current_price, momentum=momentum)
+
+    vol_ratio = getattr(momentum, "volume_ratio", 1.0) if momentum is not None else 1.0
+    rsi_val = getattr(momentum, "rsi", 50.0) if momentum is not None else 50.0
+
+    strategy_tag = evaluate_strategy_tag(
+        relative_strength=relative_strength,
+        dist_52w_pct=dist_52w_pct,
+        ma_alignment=ma_alignment,
+        rsi=rsi_val,
+        volume_ratio=vol_ratio,
+        mom_score=mom_score,
+    )
+
     # Confidence calculation
     conf = abs(blended)
     if momentum is not None:
@@ -450,7 +573,7 @@ def generate_stock_recommendation(
             conf = max(0.1, conf * 0.85)
     confidence = round(max(0.05, min(1.0, conf)), 2)
 
-    # Normalized score (0.0 to 100.0)
+    # Normalized score (0.0 to 100.0) with selection enhancements
     raw_score = ((blended + 1.0) / 2.0) * 100.0
     if momentum is not None:
         if momentum.volume_confirmed:
@@ -459,6 +582,15 @@ def generate_stock_recommendation(
             raw_score += 4.0
     if sent_score > 0.15:
         raw_score += 3.0
+
+    # Institutional selection boosts
+    if strategy_tag == "RS_LEADER" or relative_strength >= 80.0:
+        raw_score += 4.0
+    if strategy_tag == "52W_BREAKOUT" or dist_52w_pct >= -4.0:
+        raw_score += 3.5
+    if ma_alignment in ("FULL_BULLISH", "GOLDEN_CROSS"):
+        raw_score += 3.0
+
     score = round(max(0.0, min(100.0, raw_score)), 1)
 
     # Check for earnings blackout
@@ -480,6 +612,9 @@ def generate_stock_recommendation(
 
     # Transparent rationales
     rationale = []
+    rationale.append(f"Setup Strategy: {strategy_tag} (RS Rating: {relative_strength:.0f}/99, {dist_52w_pct:+.1f}% from 52W High)")
+    rationale.append(f"Moving Average Alignment: {ma_alignment}")
+
     if momentum is not None:
         rationale.append(f"Momentum: Score {mom_score:+.2f} ({momentum.trend_description})")
         rationale.append(f"Indicators: RSI-14 {momentum.rsi:.1f} | MACD Hist {momentum.macd_hist:+.3f}")
@@ -515,4 +650,8 @@ def generate_stock_recommendation(
         sentiment_score=sent_score,
         trade_plan=trade_plan,
         rationale=rationale,
+        relative_strength_score=relative_strength,
+        distance_from_52w_high_pct=dist_52w_pct,
+        ma_alignment=ma_alignment,
+        strategy_tag=strategy_tag,
     )

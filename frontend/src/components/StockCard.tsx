@@ -47,6 +47,10 @@ export interface StockRecommendationItem {
   volume_ratio: number;
   rsi: number;
   target_pct: number;
+  relative_strength_score?: number;
+  distance_from_52w_high_pct?: number;
+  ma_alignment?: string;
+  strategy_tag?: string;
 }
 
 interface StockCardProps {
@@ -97,6 +101,52 @@ export default function StockCard({
     return (
       <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-700/50 text-slate-300 border border-slate-600">
         HOLD
+      </span>
+    );
+  };
+
+  // Format strategy tag badge
+  const getStrategyBadge = (tag?: string) => {
+    if (!tag) return null;
+    const t = tag.toUpperCase();
+    if (t === "RS_LEADER") {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-[0_0_8px_rgba(6,182,212,0.2)]">
+          ⚡ RS Leader
+        </span>
+      );
+    }
+    if (t === "52W_BREAKOUT") {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-[0_0_8px_rgba(245,158,11,0.2)]">
+          🚀 52W Breakout
+        </span>
+      );
+    }
+    if (t === "GOLDEN_CROSS") {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-[0_0_8px_rgba(168,85,247,0.2)]">
+          🌟 Golden Cross
+        </span>
+      );
+    }
+    if (t === "PULLBACK_DIP") {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+          🎯 Dip Buy
+        </span>
+      );
+    }
+    if (t === "VOLUME_SURGE") {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold bg-orange-500/20 text-orange-300 border border-orange-500/40">
+          🔥 Vol Surge
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-blue-500/15 text-blue-300 border border-blue-500/30">
+        📈 Momentum
       </span>
     );
   };
@@ -207,12 +257,13 @@ export default function StockCard({
           </div>
         </div>
 
-        {/* Sector and Horizon tags */}
+        {/* Sector, Horizon and Strategy tags */}
         <div className="flex flex-wrap items-center gap-1.5 mt-3">
           <span className="px-2 py-0.5 rounded text-[11px] font-medium bg-slate-800 text-slate-300 border border-slate-700">
             {stock.sector}
           </span>
           {getHorizonBadge(stock.horizon)}
+          {getStrategyBadge(stock.strategy_tag)}
           {stock.volume_ratio >= 1.25 && (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono font-medium bg-amber-500/15 text-amber-300 border border-amber-500/30">
               <Flame className="w-3 h-3 text-amber-400" />
@@ -221,8 +272,51 @@ export default function StockCard({
           )}
         </div>
 
+        {/* Institutional Factor Badges (RS Rating & 52W High Distance) */}
+        {(stock.relative_strength_score !== undefined || stock.distance_from_52w_high_pct !== undefined) && (
+          <div className="flex flex-wrap items-center gap-2 mt-2 pt-2 border-t border-slate-800/60 text-[11px]">
+            {stock.relative_strength_score !== undefined && (
+              <span
+                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded font-mono font-semibold ${
+                  stock.relative_strength_score >= 80
+                    ? "bg-cyan-500/15 text-cyan-300 border border-cyan-500/30"
+                    : stock.relative_strength_score >= 60
+                    ? "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                    : "bg-slate-800/80 text-slate-400 border border-slate-700/60"
+                }`}
+                title="Relative Strength Percentile vs Market (0-99)"
+              >
+                <span className="text-[10px] uppercase text-slate-400">RS:</span>
+                <span className="font-bold">{Math.round(stock.relative_strength_score)}</span>
+              </span>
+            )}
+            {stock.distance_from_52w_high_pct !== undefined && (
+              <span
+                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded font-mono font-semibold ${
+                  stock.distance_from_52w_high_pct >= -3.0
+                    ? "bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                    : "bg-slate-800/80 text-slate-400 border border-slate-700/60"
+                }`}
+                title="Distance from 52-Week High"
+              >
+                <span className="text-[10px] uppercase text-slate-400">52W:</span>
+                <span>
+                  {stock.distance_from_52w_high_pct >= -0.1
+                    ? "AT HIGH"
+                    : `${stock.distance_from_52w_high_pct.toFixed(1)}%`}
+                </span>
+              </span>
+            )}
+            {stock.ma_alignment && stock.ma_alignment !== "NEUTRAL" && (
+              <span className="px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-slate-800/80 text-cyan-300 border border-slate-700/60">
+                {stock.ma_alignment.replace(/_/g, " ")}
+              </span>
+            )}
+          </div>
+        )}
+
         {/* Score & Confidence Bar */}
-        <div className="mt-4 p-2.5 rounded-lg bg-[#080d1a] border border-slate-800/80">
+        <div className="mt-3 p-2.5 rounded-lg bg-[#080d1a] border border-slate-800/80">
           <div className="flex items-center justify-between text-xs mb-1.5">
             <span className="text-slate-400 font-medium flex items-center gap-1">
               <Activity className="w-3.5 h-3.5 text-cyan-400" />
