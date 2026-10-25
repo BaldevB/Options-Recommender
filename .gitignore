@@ -8,3 +8,4 @@ frontend/node_modules/
 backtest_results.json
 .DS_Store
 *.log
+.superpowers/
