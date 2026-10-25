@@ -13,8 +13,11 @@ Provides REST endpoints for Next.js frontend:
 
 from datetime import datetime, date
 import logging
+from contextlib import asynccontextmanager
 from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from analysis.screener_cache import get_screener_cache
+from data.stock_universe import get_stock_universe, STOCK_SECTORS
 from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
 import pandas as pd
@@ -36,10 +39,28 @@ from options.suggester import suggest_options, build_zero_dte_setup, ZeroDteTrad
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifecycle manager: starts background screener cache worker on startup and shuts down gracefully."""
+    try:
+        cache = get_screener_cache()
+        cache.start_background_worker(interval_minutes=15)
+        logger.info("Stock screener cache worker initialized on startup.")
+    except Exception as exc:
+        logger.error("Failed to start stock screener worker on startup: %s", exc)
+    yield
+    try:
+        cache = get_screener_cache()
+        cache.stop_background_worker(timeout=2.0)
+    except Exception as exc:
+        logger.error("Error stopping stock screener worker: %s", exc)
+
+
 app = FastAPI(
     title="Options Suggester API",
     description="Quantitative Options Signal Engine with Delta Targeting, Commodities Universe, AI Sectors, and Uncapped High-Risk Speculative Setups",
-    version="2.3.0"
+    version="2.3.0",
+    lifespan=lifespan,
 )
 
 # Enable CORS for Next.js frontend and any local origins
@@ -868,19 +889,54 @@ def get_volatility_cockpit_endpoint(ticker: str = "NVDA"):
 
 
 
-@app.get("/api/paper-quotes")
-def get_paper_quotes_endpoint(contracts: str = ""):
-    """Retrieve current market price and quote data for active paper trading contracts."""
-    contract_list = [c.strip().upper() for c in contracts.split(",") if c.strip()]
-    if not contract_list:
-        return sanitize_json({"quotes": {}})
+def fetch_paper_quotes(items_to_quote: List[Any]) -> Dict[str, Any]:
+    """Fetch live or recent market quotes for stock tickers and options contracts."""
+    if not items_to_quote:
+        return {"quotes": {}}
+
+    extracted: List[Dict[str, str]] = []
+    for it in items_to_quote:
+        if isinstance(it, str):
+            sym = it.strip().upper()
+            if sym:
+                is_opt = len(sym) > 6 and any(ch.isdigit() for ch in sym)
+                extracted.append({
+                    "key": sym,
+                    "symbol": sym,
+                    "asset_type": "OPTION" if is_opt else "STOCK",
+                })
+        elif isinstance(it, dict):
+            sym = (it.get("symbol") or it.get("contract") or it.get("ticker") or "").strip().upper()
+            if not sym:
+                continue
+            asset_type = (it.get("asset_type") or it.get("type") or "").strip().upper()
+            if not asset_type:
+                is_opt = len(sym) > 6 and any(ch.isdigit() for ch in sym)
+                asset_type = "OPTION" if is_opt else "STOCK"
+            key = (it.get("contract") or it.get("symbol") or sym).strip().upper()
+            extracted.append({
+                "key": key,
+                "symbol": sym,
+                "asset_type": asset_type,
+            })
+
+    if not extracted:
+        return {"quotes": {}}
 
     results: Dict[str, Any] = {}
+    all_syms = list(dict.fromkeys([it["symbol"] for it in extracted]))[:50]
+
     try:
         import yfinance as yf
-        # yfinance Tickers batch fetch
-        ticks = yf.Tickers(" ".join(contract_list[:30]))
-        for sym in contract_list[:30]:
+        ticks = yf.Tickers(" ".join(all_syms))
+        for item in extracted:
+            key = item["key"]
+            sym = item["symbol"]
+            asset_type = item["asset_type"]
+
+            px = 0.0
+            prev_close = 0.0
+
             try:
                 t = ticks.tickers.get(sym)
                 fast = getattr(t, "fast_info", None) if t else None
@@ -889,19 +945,167 @@ def get_paper_quotes_endpoint(contracts: str = ""):
 
                 if px <= 0.0 and t:
                     hist = t.history(period="2d")
-                    if not hist.empty:
+                    if hist is not None and not hist.empty:
                         px = float(hist["Close"].iloc[-1])
                         if len(hist) > 1:
                             prev_close = float(hist["Close"].iloc[-2])
 
-                results[sym] = {
+                change = round(px - prev_close, 2) if (px > 0 and prev_close > 0) else 0.0
+                change_pct = round((change / prev_close) * 100.0, 2) if prev_close > 0 else 0.0
+
+                results[key] = {
+                    "symbol": sym,
+                    "asset_type": asset_type,
                     "current_price": round(px, 2),
                     "previous_close": round(prev_close, 2),
+                    "change": change,
+                    "change_pct": change_pct,
                     "valid": px > 0,
                 }
             except Exception:
-                results[sym] = {"current_price": 0.0, "previous_close": 0.0, "valid": False}
-        return sanitize_json({"quotes": results})
+                results[key] = {
+                    "symbol": sym,
+                    "asset_type": asset_type,
+                    "current_price": 0.0,
+                    "previous_close": 0.0,
+                    "valid": False,
+                }
+        return {"quotes": results}
     except Exception as exc:
         logger.error("Error retrieving paper quotes: %s", exc)
-        return sanitize_json({"quotes": results})
+        for item in extracted:
+            results[item["key"]] = {
+                "symbol": item["symbol"],
+                "asset_type": item["asset_type"],
+                "current_price": 0.0,
+                "previous_close": 0.0,
+                "valid": False,
+            }
+        return {"quotes": results}
+
+
+@app.get("/api/paper-quotes")
+def get_paper_quotes_endpoint(contracts: str = ""):
+    """Retrieve current market price and quote data for active paper trading contracts."""
+    contract_list = [c.strip().upper() for c in contracts.split(",") if c.strip()]
+    return sanitize_json(fetch_paper_quotes(contract_list))
+
+
+@app.post("/api/paper-quotes")
+async def post_paper_quotes_endpoint(request: Request):
+    """Retrieve current market quotes for active paper trading positions (both stocks and options)."""
+    items: List[Any] = []
+    try:
+        body = await request.json()
+        if isinstance(body, list):
+            items = body
+        elif isinstance(body, dict):
+            if "items" in body and isinstance(body["items"], list):
+                items = body["items"]
+            elif "positions" in body and isinstance(body["positions"], list):
+                items = body["positions"]
+            elif "contracts" in body:
+                c = body["contracts"]
+                items = c if isinstance(c, list) else [x.strip() for x in str(c).split(",") if x.strip()]
+            elif "symbols" in body:
+                s = body["symbols"]
+                items = s if isinstance(s, list) else [x.strip() for x in str(s).split(",") if x.strip()]
+    except Exception:
+        pass
+
+    quotes = fetch_paper_quotes(items)
+    return sanitize_json(quotes)
+
+
+@app.get("/api/stocks/recommendations")
+def get_stock_recommendations_endpoint(
+    horizon: Optional[str] = None,
+    sector: Optional[str] = None,
+    search: Optional[str] = None,
+    sort_by: str = "score",
+    limit: int = 50,
+    offset: int = 0,
+):
+    """Query, filter, sort, and paginate cached stock recommendations in sub-second time."""
+    cache = get_screener_cache()
+    res = cache.get_recommendations(
+        horizon=horizon,
+        sector=sector,
+        search=search,
+        sort_by=sort_by,
+        limit=limit,
+        offset=offset,
+    )
+    return sanitize_json(res)
+
+
+@app.get("/api/stocks/universe")
+def get_stocks_universe_endpoint():
+    """Return categorized stock sectors, universe catalog, and sector ticker counts."""
+    universe = get_stock_universe()
+    sector_counts: Dict[str, int] = {}
+    for item in universe:
+        sec = item.get("sector", "other")
+        sector_counts[sec] = sector_counts.get(sec, 0) + 1
+
+    sectors_list = [
+        {"key": k, "name": v, "count": sector_counts.get(k, 0)}
+        for k, v in STOCK_SECTORS.items()
+    ]
+    return sanitize_json({
+        "sectors": sectors_list,
+        "sector_map": STOCK_SECTORS,
+        "total_stocks": len(universe),
+        "sector_counts": sector_counts,
+    })
+
+
+@app.get("/api/stocks/analysis")
+def get_stocks_analysis_endpoint(
+    symbol: Optional[str] = None,
+    ticker: Optional[str] = None,
+):
+    """Retrieve full deep-dive stock analysis, trade plan, and momentum metrics."""
+    target_symbol = symbol or ticker
+    if not target_symbol or not target_symbol.strip():
+        raise HTTPException(status_code=400, detail="Stock symbol parameter is required")
+
+    target_symbol = target_symbol.strip().upper()
+    cache = get_screener_cache()
+    analysis = cache.get_analysis(target_symbol)
+    if not analysis:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Stock analysis not available for symbol: {target_symbol}",
+        )
+    return sanitize_json(analysis)
+
+
+@app.get("/api/stocks/status")
+def get_stocks_status_endpoint():
+    """Retrieve current screener cache status, counts, and background worker state."""
+    cache = get_screener_cache()
+    return sanitize_json(cache.get_status())
+
+
+@app.post("/api/stocks/refresh")
+async def post_stocks_refresh_endpoint(
+    request: Request,
+    force: bool = False,
+):
+    """Trigger manual cache refresh across stock universe or selected tickers."""
+    req_force = force
+    req_tickers: Optional[List[str]] = None
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            if "force" in body:
+                req_force = bool(body["force"])
+            if "tickers" in body and isinstance(body["tickers"], list):
+                req_tickers = [str(t).strip().upper() for t in body["tickers"] if t]
+    except Exception:
+        pass
+
+    cache = get_screener_cache()
+    res = cache.refresh_cache(force=req_force, tickers=req_tickers)
+    return sanitize_json(res)
