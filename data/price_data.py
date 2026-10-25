@@ -1,5 +1,6 @@
 """Price data fetching, quote normalization, caching, and earnings calendar checks using yfinance."""
 
+from dataclasses import dataclass, field
 from datetime import datetime, date, timezone
 import logging
 import time
@@ -10,6 +11,26 @@ import yfinance as yf
 from config import DEFAULT_CONFIG
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class QuoteData:
+    """Structured stock quote and market metadata."""
+    symbol: str
+    name: str = ""
+    current_price: float = 0.0
+    previous_close: float = 0.0
+    change: float = 0.0
+    change_percent: float = 0.0
+    day_high: float = 0.0
+    day_low: float = 0.0
+    fifty_two_week_high: float = 0.0
+    fifty_two_week_low: float = 0.0
+    volume: int = 0
+    valid: bool = True
+    beta: Optional[float] = None
+    sector: Optional[str] = None
+
 
 # Simple in-memory cache for market data: {cache_key: (timestamp, data)}
 _CACHE: Dict[str, Any] = {}
