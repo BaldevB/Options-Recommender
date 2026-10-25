@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback } from "react";
+import Link from "next/link";
 import {
   Star,
   Plus,
@@ -406,6 +407,15 @@ export default function StarredWatchlistView({
                       <span>0DTE Lab</span>
                     </button>
                   </div>
+
+                  <Link
+                    href={`/stocks?symbol=${encodeURIComponent(item.symbol)}`}
+                    className="flex w-full items-center justify-center space-x-1.5 rounded-lg border border-emerald-500/30 bg-emerald-950/30 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-900/40 hover:border-emerald-500/50 hover:text-white hover:shadow-[0_0_12px_rgba(16,185,129,0.25)] transition shadow-sm group"
+                  >
+                    <TrendingUp className="h-3.5 w-3.5 text-emerald-400 group-hover:scale-110 transition-transform" />
+                    <span>Stock Plan</span>
+                    <ArrowRight className="h-3 w-3 ml-1 text-emerald-400/80 group-hover:translate-x-0.5 transition-transform" />
+                  </Link>
                 </div>
               </div>
             );

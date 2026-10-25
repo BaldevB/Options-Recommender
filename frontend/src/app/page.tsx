@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useMemo } from "react";
 import dynamic from "next/dynamic";
+import Link from "next/link";
 import {
   TrendingUp,
   Wallet,
@@ -494,18 +495,37 @@ export default function Home() {
       <header className="sticky top-0 z-50 border-b border-slate-800/80 bg-[#070b12]/95 backdrop-blur-md">
         <div className="w-full px-4 py-2.5">
           <div className="flex items-center justify-between gap-3">
-            {/* Left: Brand Logo & Title */}
-            <div className="flex shrink-0 items-center space-x-2.5">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-tr from-cyan-500 to-indigo-600 shadow-md shadow-cyan-500/20">
-                <Zap className="h-4 w-4 text-white" />
+            {/* Left: Brand Logo & Title + Route Switcher */}
+            <div className="flex shrink-0 items-center space-x-3">
+              <div className="flex items-center space-x-2.5">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-tr from-cyan-500 to-indigo-600 shadow-md shadow-cyan-500/20">
+                  <Zap className="h-4 w-4 text-white" />
+                </div>
+                <div className="flex items-baseline space-x-2">
+                  <span className="text-sm font-bold tracking-tight text-white whitespace-nowrap">
+                    Options Suggester <span className="text-cyan-400">Pro</span>
+                  </span>
+                  <span className="hidden rounded-full bg-cyan-950/80 px-2 py-0.5 text-[9px] font-semibold text-cyan-300 border border-cyan-800/50 xl:inline-block">
+                    Next.js • Quantitative
+                  </span>
+                </div>
               </div>
-              <div className="flex items-baseline space-x-2">
-                <span className="text-sm font-bold tracking-tight text-white whitespace-nowrap">
-                  Options Suggester <span className="text-cyan-400">Pro</span>
+
+              {/* Route Switcher: Options Pro ⇄ Stock Picks Pro */}
+              <div className="flex items-center space-x-1 rounded-xl border border-slate-800/90 bg-[#0a1120] p-1 text-xs">
+                <span
+                  title="Current page: Options Terminal"
+                  className="flex items-center space-x-1.5 rounded-lg bg-cyan-500/20 px-2.5 py-1 font-semibold text-cyan-300 border border-cyan-500/40 shadow-sm shadow-cyan-500/20 whitespace-nowrap"
+                >
+                  <span>⚡ Options Pro</span>
                 </span>
-                <span className="hidden rounded-full bg-cyan-950/80 px-2 py-0.5 text-[9px] font-semibold text-cyan-300 border border-cyan-800/50 xl:inline-block">
-                  Next.js • Quantitative
-                </span>
+                <Link
+                  href="/stocks"
+                  title="Switch to Stock Picks Pro"
+                  className="flex items-center space-x-1.5 rounded-lg px-2.5 py-1 font-medium text-slate-400 hover:text-emerald-300 hover:bg-emerald-950/40 border border-transparent hover:border-emerald-500/40 hover:shadow-[0_0_15px_rgba(16,185,129,0.35)] transition-all duration-200 whitespace-nowrap group"
+                >
+                  <span className="group-hover:text-emerald-300 transition">📈 Stock Picks Pro</span>
+                </Link>
               </div>
             </div>
 
