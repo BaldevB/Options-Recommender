@@ -4,5 +4,7 @@ __pycache__/
 .idea/
 frontend/.next/
 frontend/node_modules/
+*.tsbuildinfo
+backtest_results.json
 .DS_Store
 *.log
