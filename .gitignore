@@ -1,11 +1,101 @@
-.venv/
+# ==========================================
+# Environment Variables & Secrets
+# ==========================================
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.env
+!.env.example
+
+# ==========================================
+# Python & Virtual Environments
+# ==========================================
 __pycache__/
-*.pyc
-.idea/
-frontend/.next/
-frontend/node_modules/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ==========================================
+# Testing & Code Quality
+# ==========================================
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# ==========================================
+# Node.js & Next.js
+# ==========================================
+node_modules/
+*/node_modules/
+.next/
+*/.next/
+out/
+*/out/
 *.tsbuildinfo
-backtest_results.json
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.vercel
+
+# ==========================================
+# IDEs & Code Editors
+# ==========================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
+# ==========================================
+# Operating System Files
+# ==========================================
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# ==========================================
+# Application Caches & Logs
+# ==========================================
 *.log
+logs/
+*.sqlite
+*.sqlite3
+backtest_results.json
 .superpowers/
