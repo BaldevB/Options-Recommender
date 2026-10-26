@@ -25,6 +25,14 @@ from data.stock_universe import get_stock_universe, STOCK_SECTORS
 
 logger = logging.getLogger(__name__)
 
+PRIORITY_LEADER_TICKERS = [
+    "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "AMD",
+    "PLTR", "AVGO", "CRWD", "SMCI", "CCJ", "FCX", "XOM", "JPM",
+    "LLY", "COST", "WMT", "NFLX", "ARM", "PANW", "COIN", "MU",
+    "INTC", "MRVL", "QCOM", "NOW", "ISRG", "UBER", "CAT", "GE",
+    "V", "MA", "UNH", "ABBV", "CVX", "SLB", "NUE", "URA",
+]
+
 
 def normalize_sector_query(sector: Optional[str]) -> Optional[str]:
     """Normalize user or internal sector string to standard lowercase slug."""
@@ -140,11 +148,536 @@ def recommendation_to_dict(
     }
 
 
+def _get_default_seed_stocks() -> List[Dict[str, Any]]:
+    """Return an instant curated seed of recommendations across sectors and strategies."""
+    return [
+        {
+            "symbol": "NVDA",
+            "name": "NVIDIA Corporation",
+            "sector": "technology",
+            "horizon": "SWING",
+            "action": "STRONG BUY",
+            "score": 93.5,
+            "confidence": 0.88,
+            "momentum_score": 0.74,
+            "sentiment_score": 0.45,
+            "trade_plan": {
+                "entry_zone": [138.0, 142.5],
+                "current_price": 141.20,
+                "tp1": 158.0,
+                "tp2": 172.0,
+                "stop_loss": 132.5,
+                "risk_reward_ratio": 2.15,
+                "invalidation_pct": 6.16,
+                "tp1_pct": 11.9,
+                "tp2_pct": 21.8,
+            },
+            "rationale": [
+                "Dominant institutional demand and high RS percentile rating (94) vs market benchmark.",
+                "Consolidating inside high-probability breakout zone within 2% of 52-week rolling highs.",
+                "Full bullish moving average alignment (20 EMA > 50 SMA > 200 SMA).",
+            ],
+            "price": 141.20,
+            "change": 3.45,
+            "change_pct": 2.51,
+            "volume_ratio": 1.45,
+            "rsi": 64.2,
+            "target_pct": 11.9,
+            "relative_strength_score": 94.0,
+            "distance_from_52w_high_pct": -1.8,
+            "ma_alignment": "FULL_BULLISH",
+            "strategy_tag": "RS_LEADER",
+        },
+        {
+            "symbol": "PLTR",
+            "name": "Palantir Technologies Inc.",
+            "sector": "technology",
+            "horizon": "SWING",
+            "action": "STRONG BUY",
+            "score": 94.0,
+            "confidence": 0.90,
+            "momentum_score": 0.82,
+            "sentiment_score": 0.40,
+            "trade_plan": {
+                "entry_zone": [42.8, 44.2],
+                "current_price": 43.75,
+                "tp1": 50.0,
+                "tp2": 56.0,
+                "stop_loss": 40.5,
+                "risk_reward_ratio": 2.25,
+                "invalidation_pct": 7.43,
+                "tp1_pct": 14.3,
+                "tp2_pct": 28.0,
+            },
+            "rationale": [
+                "Top 1% market leader with Relative Strength of 97 and high volume accumulation.",
+                "Breaking out above historical resistance on 1.7x volume expansion.",
+                "Full bullish moving average structure with rising 20 EMA.",
+            ],
+            "price": 43.75,
+            "change": 1.85,
+            "change_pct": 4.42,
+            "volume_ratio": 1.72,
+            "rsi": 68.5,
+            "target_pct": 14.3,
+            "relative_strength_score": 97.0,
+            "distance_from_52w_high_pct": -0.6,
+            "ma_alignment": "FULL_BULLISH",
+            "strategy_tag": "52W_BREAKOUT",
+        },
+        {
+            "symbol": "TSLA",
+            "name": "Tesla, Inc.",
+            "sector": "consumer_discretionary",
+            "horizon": "SWING",
+            "action": "STRONG BUY",
+            "score": 91.0,
+            "confidence": 0.84,
+            "momentum_score": 0.70,
+            "sentiment_score": 0.35,
+            "trade_plan": {
+                "entry_zone": [255.0, 264.0],
+                "current_price": 260.50,
+                "tp1": 295.0,
+                "tp2": 320.0,
+                "stop_loss": 242.0,
+                "risk_reward_ratio": 2.10,
+                "invalidation_pct": 7.10,
+                "tp1_pct": 13.2,
+                "tp2_pct": 22.8,
+            },
+            "rationale": [
+                "Strong relative strength vs broader market with sharp upward momentum surge.",
+                "Volume confirmation above 20-day moving average.",
+                "Bullish trend continuation pattern holding key moving averages.",
+            ],
+            "price": 260.50,
+            "change": 7.30,
+            "change_pct": 2.88,
+            "volume_ratio": 1.38,
+            "rsi": 62.0,
+            "target_pct": 13.2,
+            "relative_strength_score": 91.0,
+            "distance_from_52w_high_pct": -2.4,
+            "ma_alignment": "FULL_BULLISH",
+            "strategy_tag": "RS_LEADER",
+        },
+        {
+            "symbol": "META",
+            "name": "Meta Platforms, Inc.",
+            "sector": "communication_services",
+            "horizon": "SWING",
+            "action": "STRONG BUY",
+            "score": 90.5,
+            "confidence": 0.86,
+            "momentum_score": 0.68,
+            "sentiment_score": 0.38,
+            "trade_plan": {
+                "entry_zone": [575.0, 588.0],
+                "current_price": 582.00,
+                "tp1": 640.0,
+                "tp2": 690.0,
+                "stop_loss": 552.0,
+                "risk_reward_ratio": 2.12,
+                "invalidation_pct": 5.15,
+                "tp1_pct": 10.0,
+                "tp2_pct": 18.6,
+            },
+            "rationale": [
+                "Testing all-time rolling highs with steady accumulation from institutional funds.",
+                "Consolidation base breakout with RSI at healthy bullish level.",
+                "Full bullish trend stacking across 20, 50, and 200 daily moving averages.",
+            ],
+            "price": 582.00,
+            "change": 8.50,
+            "change_pct": 1.48,
+            "volume_ratio": 1.25,
+            "rsi": 63.5,
+            "target_pct": 10.0,
+            "relative_strength_score": 92.0,
+            "distance_from_52w_high_pct": -1.2,
+            "ma_alignment": "FULL_BULLISH",
+            "strategy_tag": "52W_BREAKOUT",
+        },
+        {
+            "symbol": "AAPL",
+            "name": "Apple Inc.",
+            "sector": "technology",
+            "horizon": "LONG_TERM",
+            "action": "BUY ACCUMULATE",
+            "score": 84.5,
+            "confidence": 0.82,
+            "momentum_score": 0.52,
+            "sentiment_score": 0.28,
+            "trade_plan": {
+                "entry_zone": [226.0, 232.0],
+                "current_price": 229.50,
+                "tp1": 252.0,
+                "tp2": 270.0,
+                "stop_loss": 218.0,
+                "risk_reward_ratio": 1.95,
+                "invalidation_pct": 5.01,
+                "tp1_pct": 9.8,
+                "tp2_pct": 17.6,
+            },
+            "rationale": [
+                "Steady uptrend channel supported by 50-day moving average.",
+                "Healthy risk-reward ratio of 1.95:1 with manageable downside invalidation.",
+                "Favorable longer-term product cycle catalyst.",
+            ],
+            "price": 229.50,
+            "change": 1.80,
+            "change_pct": 0.79,
+            "volume_ratio": 1.05,
+            "rsi": 58.2,
+            "target_pct": 9.8,
+            "relative_strength_score": 82.0,
+            "distance_from_52w_high_pct": -2.8,
+            "ma_alignment": "BULLISH_TREND",
+            "strategy_tag": "MOMENTUM_SWING",
+        },
+        {
+            "symbol": "MSFT",
+            "name": "Microsoft Corporation",
+            "sector": "technology",
+            "horizon": "SWING",
+            "action": "BUY ACCUMULATE",
+            "score": 86.0,
+            "confidence": 0.83,
+            "momentum_score": 0.58,
+            "sentiment_score": 0.32,
+            "trade_plan": {
+                "entry_zone": [422.0, 430.0],
+                "current_price": 426.00,
+                "tp1": 465.0,
+                "tp2": 490.0,
+                "stop_loss": 405.0,
+                "risk_reward_ratio": 1.86,
+                "invalidation_pct": 4.93,
+                "tp1_pct": 9.2,
+                "tp2_pct": 15.0,
+            },
+            "rationale": [
+                "Golden Cross formation with 50 SMA crossing above 200 SMA.",
+                "Institutional accumulation at key support zone.",
+                "Cloud & enterprise AI growth driving earnings resilience.",
+            ],
+            "price": 426.00,
+            "change": 2.40,
+            "change_pct": 0.57,
+            "volume_ratio": 1.12,
+            "rsi": 56.4,
+            "target_pct": 9.2,
+            "relative_strength_score": 85.0,
+            "distance_from_52w_high_pct": -3.5,
+            "ma_alignment": "GOLDEN_CROSS",
+            "strategy_tag": "GOLDEN_CROSS",
+        },
+        {
+            "symbol": "AMZN",
+            "name": "Amazon.com, Inc.",
+            "sector": "consumer_discretionary",
+            "horizon": "SWING",
+            "action": "STRONG BUY",
+            "score": 89.0,
+            "confidence": 0.85,
+            "momentum_score": 0.65,
+            "sentiment_score": 0.36,
+            "trade_plan": {
+                "entry_zone": [185.0, 190.0],
+                "current_price": 188.50,
+                "tp1": 210.0,
+                "tp2": 225.0,
+                "stop_loss": 178.0,
+                "risk_reward_ratio": 2.05,
+                "invalidation_pct": 5.57,
+                "tp1_pct": 11.4,
+                "tp2_pct": 19.4,
+            },
+            "rationale": [
+                "Approaching 52-week rolling high with accelerating cloud margin expansion.",
+                "Golden Cross structure supported by rising 50 DMA.",
+                "RSI confirms momentum without entering overbought territory.",
+            ],
+            "price": 188.50,
+            "change": 3.10,
+            "change_pct": 1.67,
+            "volume_ratio": 1.28,
+            "rsi": 61.8,
+            "target_pct": 11.4,
+            "relative_strength_score": 88.0,
+            "distance_from_52w_high_pct": -2.5,
+            "ma_alignment": "GOLDEN_CROSS",
+            "strategy_tag": "GOLDEN_CROSS",
+        },
+        {
+            "symbol": "CCJ",
+            "name": "Cameco Corporation",
+            "sector": "energy",
+            "horizon": "SWING",
+            "action": "STRONG BUY",
+            "score": 88.5,
+            "confidence": 0.86,
+            "momentum_score": 0.72,
+            "sentiment_score": 0.42,
+            "trade_plan": {
+                "entry_zone": [52.0, 54.5],
+                "current_price": 53.80,
+                "tp1": 62.0,
+                "tp2": 68.0,
+                "stop_loss": 49.5,
+                "risk_reward_ratio": 2.12,
+                "invalidation_pct": 7.99,
+                "tp1_pct": 15.2,
+                "tp2_pct": 26.4,
+            },
+            "rationale": [
+                "Nuclear energy & uranium secular multi-year structural supply deficit.",
+                "52-week high breakout with institutional volume expansion.",
+                "Full bullish trend alignment across all key EMAs.",
+            ],
+            "price": 53.80,
+            "change": 1.95,
+            "change_pct": 3.76,
+            "volume_ratio": 1.48,
+            "rsi": 66.0,
+            "target_pct": 15.2,
+            "relative_strength_score": 89.0,
+            "distance_from_52w_high_pct": -1.9,
+            "ma_alignment": "FULL_BULLISH",
+            "strategy_tag": "52W_BREAKOUT",
+        },
+        {
+            "symbol": "FCX",
+            "name": "Freeport-McMoRan Inc.",
+            "sector": "materials",
+            "horizon": "SWING",
+            "action": "BUY ACCUMULATE",
+            "score": 81.0,
+            "confidence": 0.80,
+            "momentum_score": 0.48,
+            "sentiment_score": 0.25,
+            "trade_plan": {
+                "entry_zone": [44.0, 46.0],
+                "current_price": 45.20,
+                "tp1": 52.0,
+                "tp2": 57.0,
+                "stop_loss": 41.5,
+                "risk_reward_ratio": 1.84,
+                "invalidation_pct": 8.19,
+                "tp1_pct": 15.0,
+                "tp2_pct": 26.1,
+            },
+            "rationale": [
+                "Pullback dip buy opportunity holding key support near the 50-day moving average.",
+                "Copper demand fundamentals supported by AI data centers and electrification.",
+                "Favorable 1.84:1 risk-reward profile on technical bounce.",
+            ],
+            "price": 45.20,
+            "change": 0.85,
+            "change_pct": 1.92,
+            "volume_ratio": 1.15,
+            "rsi": 44.5,
+            "target_pct": 15.0,
+            "relative_strength_score": 78.0,
+            "distance_from_52w_high_pct": -8.5,
+            "ma_alignment": "ABOVE_50DMA",
+            "strategy_tag": "PULLBACK_DIP",
+        },
+        {
+            "symbol": "AMD",
+            "name": "Advanced Micro Devices, Inc.",
+            "sector": "technology",
+            "horizon": "SWING",
+            "action": "BUY ACCUMULATE",
+            "score": 79.5,
+            "confidence": 0.79,
+            "momentum_score": 0.42,
+            "sentiment_score": 0.22,
+            "trade_plan": {
+                "entry_zone": [148.0, 154.0],
+                "current_price": 152.00,
+                "tp1": 175.0,
+                "tp2": 190.0,
+                "stop_loss": 140.0,
+                "risk_reward_ratio": 1.92,
+                "invalidation_pct": 7.89,
+                "tp1_pct": 15.1,
+                "tp2_pct": 25.0,
+            },
+            "rationale": [
+                "Pullback into strong horizontal support cluster with oversold RSI bounce.",
+                "Data center GPU market share expansion provides strong catalyst.",
+                "Defined stop loss beneath the 200-day moving average zone.",
+            ],
+            "price": 152.00,
+            "change": -1.20,
+            "change_pct": -0.78,
+            "volume_ratio": 1.10,
+            "rsi": 42.0,
+            "target_pct": 15.1,
+            "relative_strength_score": 74.0,
+            "distance_from_52w_high_pct": -14.2,
+            "ma_alignment": "ABOVE_50DMA",
+            "strategy_tag": "PULLBACK_DIP",
+        },
+        {
+            "symbol": "JPM",
+            "name": "JPMorgan Chase & Co.",
+            "sector": "financials",
+            "horizon": "LONG_TERM",
+            "action": "STRONG BUY",
+            "score": 87.0,
+            "confidence": 0.85,
+            "momentum_score": 0.60,
+            "sentiment_score": 0.30,
+            "trade_plan": {
+                "entry_zone": [218.0, 224.0],
+                "current_price": 222.00,
+                "tp1": 245.0,
+                "tp2": 260.0,
+                "stop_loss": 210.0,
+                "risk_reward_ratio": 1.92,
+                "invalidation_pct": 5.41,
+                "tp1_pct": 10.4,
+                "tp2_pct": 17.1,
+            },
+            "rationale": [
+                "Best-in-class financial franchise breaking out to new rolling highs.",
+                "Net interest income resilience and strong investment banking fees.",
+                "Consistent relative strength outperforming the S&P 500 index.",
+            ],
+            "price": 222.00,
+            "change": 2.10,
+            "change_pct": 0.96,
+            "volume_ratio": 1.18,
+            "rsi": 62.5,
+            "target_pct": 10.4,
+            "relative_strength_score": 86.0,
+            "distance_from_52w_high_pct": -1.5,
+            "ma_alignment": "FULL_BULLISH",
+            "strategy_tag": "52W_BREAKOUT",
+        },
+        {
+            "symbol": "LLY",
+            "name": "Eli Lilly and Company",
+            "sector": "healthcare",
+            "horizon": "LONG_TERM",
+            "action": "STRONG BUY",
+            "score": 90.0,
+            "confidence": 0.87,
+            "momentum_score": 0.68,
+            "sentiment_score": 0.35,
+            "trade_plan": {
+                "entry_zone": [890.0, 915.0],
+                "current_price": 905.00,
+                "tp1": 1020.0,
+                "tp2": 1100.0,
+                "stop_loss": 845.0,
+                "risk_reward_ratio": 1.92,
+                "invalidation_pct": 6.63,
+                "tp1_pct": 12.7,
+                "tp2_pct": 21.5,
+            },
+            "rationale": [
+                "Healthcare sector market leader with RS rating of 90 and explosive GLP-1 revenue.",
+                "Bullish moving average alignment holding above 20 and 50 EMAs.",
+                "Superior margins and accelerating multi-year earnings revisions.",
+            ],
+            "price": 905.00,
+            "change": 12.40,
+            "change_pct": 1.39,
+            "volume_ratio": 1.22,
+            "rsi": 63.8,
+            "target_pct": 12.7,
+            "relative_strength_score": 90.0,
+            "distance_from_52w_high_pct": -2.2,
+            "ma_alignment": "FULL_BULLISH",
+            "strategy_tag": "RS_LEADER",
+        },
+        {
+            "symbol": "COST",
+            "name": "Costco Wholesale Corporation",
+            "sector": "consumer_staples",
+            "horizon": "LONG_TERM",
+            "action": "STRONG BUY",
+            "score": 88.0,
+            "confidence": 0.86,
+            "momentum_score": 0.62,
+            "sentiment_score": 0.32,
+            "trade_plan": {
+                "entry_zone": [895.0, 920.0],
+                "current_price": 912.00,
+                "tp1": 1010.0,
+                "tp2": 1080.0,
+                "stop_loss": 860.0,
+                "risk_reward_ratio": 1.88,
+                "invalidation_pct": 5.70,
+                "tp1_pct": 10.7,
+                "tp2_pct": 18.4,
+            },
+            "rationale": [
+                "Exceptional customer renewal rates and steady compound growth.",
+                "Testing all-time highs on steady volume accumulation.",
+                "Defensive high-growth consumer staple holding key EMAs.",
+            ],
+            "price": 912.00,
+            "change": 8.00,
+            "change_pct": 0.88,
+            "volume_ratio": 1.15,
+            "rsi": 64.0,
+            "target_pct": 10.7,
+            "relative_strength_score": 87.0,
+            "distance_from_52w_high_pct": -1.3,
+            "ma_alignment": "FULL_BULLISH",
+            "strategy_tag": "52W_BREAKOUT",
+        },
+        {
+            "symbol": "CRWD",
+            "name": "CrowdStrike Holdings, Inc.",
+            "sector": "technology",
+            "horizon": "SWING",
+            "action": "STRONG BUY",
+            "score": 86.5,
+            "confidence": 0.84,
+            "momentum_score": 0.64,
+            "sentiment_score": 0.30,
+            "trade_plan": {
+                "entry_zone": [315.0, 325.0],
+                "current_price": 322.00,
+                "tp1": 365.0,
+                "tp2": 395.0,
+                "stop_loss": 298.0,
+                "risk_reward_ratio": 1.79,
+                "invalidation_pct": 7.45,
+                "tp1_pct": 13.4,
+                "tp2_pct": 22.7,
+            },
+            "rationale": [
+                "Completed major bottoming base and reclaiming the 200-day moving average.",
+                "Golden Cross structural signal with 20 EMA crossing above 50 SMA.",
+                "Enterprise cybersecurity spending remains a top non-discretionary priority.",
+            ],
+            "price": 322.00,
+            "change": 5.60,
+            "change_pct": 1.77,
+            "volume_ratio": 1.34,
+            "rsi": 61.2,
+            "target_pct": 13.4,
+            "relative_strength_score": 84.0,
+            "distance_from_52w_high_pct": -5.1,
+            "ma_alignment": "GOLDEN_CROSS",
+            "strategy_tag": "GOLDEN_CROSS",
+        },
+    ]
+
+
 def fetch_single_stock_analysis(symbol: str) -> Optional[Dict[str, Any]]:
     """Fetch on-demand deep dive stock analysis for any US equity symbol."""
     try:
         from data.price_data import get_current_quote, get_price_history, get_earnings_info
-        from analysis.sentiment import analyze_sentiment
+        from data.news_data import get_company_news
+        from analysis.sentiment import analyze_news_sentiment
 
         symbol = symbol.strip().upper()
         quote = get_current_quote(symbol)
@@ -158,7 +691,8 @@ def fetch_single_stock_analysis(symbol: str) -> Optional[Dict[str, Any]]:
 
         sentiment = None
         try:
-            sentiment = analyze_sentiment(symbol)
+            articles = get_company_news(symbol, limit=5)
+            sentiment = analyze_news_sentiment(articles, symbol=symbol)
         except Exception:
             pass
 
@@ -185,7 +719,7 @@ def fetch_single_stock_analysis(symbol: str) -> Optional[Dict[str, Any]]:
 class StockScreenerCache:
     """Thread-safe in-memory cache and background refresh manager for stock screener."""
 
-    def __init__(self) -> None:
+    def __init__(self, seed_defaults: bool = False) -> None:
         self._lock = threading.RLock()
         self._cached_items: List[Dict[str, Any]] = []
         self._cached_dict: Dict[str, Dict[str, Any]] = {}
@@ -197,6 +731,10 @@ class StockScreenerCache:
         self._worker_thread: Optional[threading.Thread] = None
         self._stop_worker_event: threading.Event = threading.Event()
         self._worker_interval_minutes: int = 15
+
+        if seed_defaults:
+            seeds = _get_default_seed_stocks()
+            self._set_cached_items(seeds)
 
     def _set_cached_items(self, items: List[Union[StockRecommendation, Dict[str, Any]]]) -> None:
         """Helper to seed or overwrite cache thread-safely."""
@@ -235,6 +773,14 @@ class StockScreenerCache:
             Dict containing total count, page items, pagination metadata, and updated timestamp.
         """
         with self._lock:
+            if not self._cached_items and self._status == "empty":
+                seeds = _get_default_seed_stocks()
+                self._cached_items = [recommendation_to_dict(it) for it in seeds]
+                self._cached_items.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+                self._cached_dict = {it["symbol"]: it for it in self._cached_items}
+                self._last_updated = datetime.now(timezone.utc).isoformat()
+                self._last_updated_ts = time.time()
+                self._status = "ready"
             items_snapshot = list(self._cached_items)
             updated_at = self._last_updated
 
@@ -379,7 +925,11 @@ class StockScreenerCache:
         tickers: Optional[List[str]] = None,
         chunk_size: int = 100,
     ) -> Dict[str, Any]:
-        """Perform batch historical price downloads, compute momentum & trade plans, and refresh cache."""
+        """Perform batch historical price downloads, compute momentum & trade plans, and refresh cache.
+
+        Progressively updates the cache after each batch chunk so recommendations
+        appear immediately rather than waiting for the entire universe to finish.
+        """
         with self._lock:
             if self._is_refreshing and not force:
                 return {
@@ -388,17 +938,21 @@ class StockScreenerCache:
                     "cached_stocks": len(self._cached_items),
                 }
             self._is_refreshing = True
-            self._status = "refreshing"
+            if not self._cached_items:
+                self._status = "refreshing"
 
         try:
             if tickers is None:
                 universe_items = get_stock_universe()
                 all_tickers = [item["symbol"] for item in universe_items]
+                # Order priority market leaders first so they appear immediately
+                priorities = [t for t in PRIORITY_LEADER_TICKERS if t in all_tickers]
+                remaining = [t for t in all_tickers if t not in PRIORITY_LEADER_TICKERS]
+                clean_tickers = priorities + remaining
             else:
                 all_tickers = [t.strip().upper() for t in tickers if t and t.strip()]
+                clean_tickers = list(dict.fromkeys(all_tickers))
 
-            # Deduplicate tickers while maintaining order
-            clean_tickers = list(dict.fromkeys(all_tickers))
             recs: List[Dict[str, Any]] = []
 
             for i in range(0, len(clean_tickers), chunk_size):
@@ -425,6 +979,7 @@ class StockScreenerCache:
                 level0_cols = set(data.columns.get_level_values(0)) if is_multi else set()
                 level1_cols = set(data.columns.get_level_values(1)) if is_multi else set()
 
+                chunk_recs: List[Dict[str, Any]] = []
                 for sym in chunk:
                     try:
                         df_sym: Optional[pd.DataFrame] = None
@@ -470,13 +1025,29 @@ class StockScreenerCache:
                         )
 
                         rec_dict = recommendation_to_dict(rec, momentum=mom, quote=quote_summary)
+                        chunk_recs.append(rec_dict)
                         recs.append(rec_dict)
                     except Exception as sym_exc:
                         logger.debug("Skipping symbol %s due to computation error: %s", sym, sym_exc)
                         continue
 
+                # Progressively update cache after each chunk (only when scanning full universe)
+                if chunk_recs and tickers is None:
+                    with self._lock:
+                        for it in chunk_recs:
+                            self._cached_dict[it["symbol"]] = it
+                        self._cached_items = sorted(
+                            self._cached_dict.values(),
+                            key=lambda x: x.get("score", 0.0),
+                            reverse=True,
+                        )
+                        self._last_updated = datetime.now(timezone.utc).isoformat()
+                        self._last_updated_ts = time.time()
+                        self._status = "ready"
+
             if recs:
-                self._set_cached_items(recs)
+                if tickers is not None:
+                    self._set_cached_items(recs)
                 logger.info("Stock screener cache refreshed successfully with %d stocks.", len(recs))
                 return {
                     "status": "success",
@@ -484,11 +1055,17 @@ class StockScreenerCache:
                     "updated_at": self._last_updated,
                 }
             else:
-                with self._lock:
-                    if not self._cached_items:
+                if tickers is not None:
+                    with self._lock:
+                        self._cached_items = []
+                        self._cached_dict = {}
                         self._status = "empty"
-                    else:
-                        self._status = "ready"
+                else:
+                    with self._lock:
+                        if not self._cached_items:
+                            self._status = "empty"
+                        else:
+                            self._status = "ready"
                 return {
                     "status": "empty",
                     "scanned_stocks": 0,
@@ -553,5 +1130,5 @@ def get_screener_cache() -> StockScreenerCache:
     global _GLOBAL_SCREENER_CACHE
     with _GLOBAL_CACHE_LOCK:
         if _GLOBAL_SCREENER_CACHE is None:
-            _GLOBAL_SCREENER_CACHE = StockScreenerCache()
+            _GLOBAL_SCREENER_CACHE = StockScreenerCache(seed_defaults=True)
         return _GLOBAL_SCREENER_CACHE

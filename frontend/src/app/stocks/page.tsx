@@ -57,7 +57,11 @@ interface SectorOption {
 
 interface ScreenerStatus {
   status: string;
-  cached_count: number;
+  cached_stocks?: number;
+  cached_count?: number;
+  total_stocks: number;
+  total_universe: number;
+  is_refreshing: boolean;
   last_updated: string | null;
   refresh_interval_sec?: number;
 }
@@ -194,7 +198,6 @@ function StockRecommendationsContent() {
 
   // Fetch Recommendations
   const fetchRecommendations = useCallback(async () => {
-    setLoading(true);
     setError(null);
     try {
       const params = new URLSearchParams();
@@ -237,6 +240,19 @@ function StockRecommendationsContent() {
     fetchRecommendations();
   }, [fetchRecommendations]);
 
+  // Auto-poll if screener is actively refreshing or if no recommendations yet
+  useEffect(() => {
+    let interval: NodeJS.Timeout | null = null;
+    if (cacheStatus?.is_refreshing || recommendations.length === 0) {
+      interval = setInterval(() => {
+        fetchRecommendations();
+      }, 3000);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [cacheStatus?.is_refreshing, recommendations.length, fetchRecommendations]);
+
   // Trigger Force Refresh
   const handleForceRefresh = async () => {
     setRefreshing(true);
@@ -247,7 +263,7 @@ function StockRecommendationsContent() {
         body: JSON.stringify({ force: true }),
       });
       if (res.ok) {
-        showToast("Screener cache refreshed across stock universe!");
+        showToast("Screener scan started in background. Recommendations will update automatically!");
         await fetchRecommendations();
       } else {
         showToast("Refresh queued or already in progress.");
@@ -358,7 +374,7 @@ function StockRecommendationsContent() {
   // Top statistics
   const stats = useMemo(() => {
     const total = recommendations.length;
-    if (total === 0) return { total: 0, avgScore: 0, strongBuys: 0, avgGain: 0 };
+    if (total === 0) return { total: 0, avgScore: "0.0", strongBuys: 0, avgGain: "0.0" };
     const avgScore = recommendations.reduce((acc, r) => acc + (r.score || 0), 0) / total;
     const strongBuys = recommendations.filter((r) => (r.action || "").includes("STRONG")).length;
     const avgGain = recommendations.reduce((acc, r) => acc + (r.trade_plan?.tp1_pct || 0), 0) / total;
@@ -417,6 +433,14 @@ function StockRecommendationsContent() {
 
           {/* Quick Header Actions */}
           <div className="flex items-center gap-2">
+            {/* Live Screener Scan Indicator */}
+            {cacheStatus?.is_refreshing && (
+              <span className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-mono text-cyan-300 bg-cyan-950/40 border border-cyan-800/40">
+                <RefreshCw className="w-3 h-3 animate-spin text-cyan-400" />
+                Scanning Universe ({cacheStatus.cached_stocks || recommendations.length}/{cacheStatus.total_stocks || 1100})
+              </span>
+            )}
+
             {/* Paper Portfolio Drawer Toggle */}
             <button
               type="button"
@@ -441,7 +465,7 @@ function StockRecommendationsContent() {
               className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-slate-300 hover:text-cyan-300 transition-colors"
               title="Refresh Screener Cache"
             >
-              <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin text-cyan-400" : ""}`} />
+              <RefreshCw className={`w-4 h-4 ${refreshing || cacheStatus?.is_refreshing ? "animate-spin text-cyan-400" : ""}`} />
             </button>
           </div>
         </div>
@@ -622,7 +646,7 @@ function StockRecommendationsContent() {
                 Stocks Screened
               </span>
               <span className="font-mono text-base font-bold text-slate-100">
-                {stats.total} Active
+                {stats.total} Live Picks
               </span>
             </div>
           </div>
@@ -671,12 +695,12 @@ function StockRecommendationsContent() {
         </div>
 
         {/* Content View: Loading, Error, Grid or Table */}
-        {loading ? (
+        {loading && recommendations.length === 0 ? (
           <div className="py-20 flex flex-col items-center justify-center space-y-3">
             <RefreshCw className="w-8 h-8 text-cyan-400 animate-spin" />
             <p className="text-sm font-mono text-slate-400">Scanning 1,000+ US stock universe &amp; computing signals...</p>
           </div>
-        ) : error ? (
+        ) : error && recommendations.length === 0 ? (
           <div className="p-6 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-rose-300 flex items-center justify-between">
             <div className="flex items-center gap-3">
               <AlertCircle className="w-6 h-6 text-rose-400 flex-shrink-0" />
@@ -694,23 +718,35 @@ function StockRecommendationsContent() {
           </div>
         ) : sortedRecommendations.length === 0 ? (
           <div className="py-20 text-center rounded-2xl border border-slate-800 bg-[#090e1b] p-8">
-            <Compass className="w-12 h-12 mx-auto text-slate-600 mb-3 opacity-60" />
-            <h3 className="text-base font-bold text-slate-200">No stock picks found</h3>
-            <p className="text-xs text-slate-400 mt-1 max-w-md mx-auto">
-              No recommendations match the filter criteria. Try resetting your search or selecting &ldquo;All Sectors&rdquo;.
-            </p>
-            <button
-              type="button"
-              onClick={() => {
-                setActiveHorizon("ALL");
-                setActiveStrategy("ALL");
-                setSelectedSector("ALL");
-                setSearchQuery("");
-              }}
-              className="mt-4 px-4 py-2 rounded-xl bg-cyan-600/25 hover:bg-cyan-600/40 text-cyan-300 border border-cyan-500/40 text-xs font-semibold transition-colors"
-            >
-              Reset Filters
-            </button>
+            {cacheStatus?.is_refreshing ? (
+              <div className="flex flex-col items-center justify-center">
+                <RefreshCw className="w-10 h-10 text-cyan-400 animate-spin mb-3" />
+                <h3 className="text-base font-bold text-slate-200">Scanning US Stock Universe...</h3>
+                <p className="text-xs text-slate-400 mt-1 max-w-md mx-auto font-mono">
+                  The quantitative screener is calculating multi-factor momentum and moving averages across 1,100+ tickers. Live recommendations will display automatically.
+                </p>
+              </div>
+            ) : (
+              <>
+                <Compass className="w-12 h-12 mx-auto text-slate-600 mb-3 opacity-60" />
+                <h3 className="text-base font-bold text-slate-200">No stock picks found</h3>
+                <p className="text-xs text-slate-400 mt-1 max-w-md mx-auto">
+                  No recommendations match the filter criteria. Try resetting your search or selecting &ldquo;All Sectors&rdquo;.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveHorizon("ALL");
+                    setActiveStrategy("ALL");
+                    setSelectedSector("ALL");
+                    setSearchQuery("");
+                  }}
+                  className="mt-4 px-4 py-2 rounded-xl bg-cyan-600/25 hover:bg-cyan-600/40 text-cyan-300 border border-cyan-500/40 text-xs font-semibold transition-colors"
+                >
+                  Reset Filters
+                </button>
+              </>
+            )}
           </div>
         ) : viewMode === "grid" ? (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
