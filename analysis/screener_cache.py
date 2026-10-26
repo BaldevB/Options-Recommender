@@ -97,6 +97,24 @@ def recommendation_to_dict(
             d["accumulation_rating"] = str(d.get("accumulation_rating", "B"))
         if "up_down_volume_ratio" not in d:
             d["up_down_volume_ratio"] = float(d.get("up_down_volume_ratio", 1.0))
+        if "roc_3d" not in d:
+            d["roc_3d"] = float(d.get("roc_3d", 0.0))
+        if "roc_5d" not in d:
+            d["roc_5d"] = float(d.get("roc_5d", 0.0))
+        if "roc_10d" not in d:
+            d["roc_10d"] = float(d.get("roc_10d", 0.0))
+        if "short_term_rsi" not in d:
+            d["short_term_rsi"] = float(d.get("short_term_rsi", d.get("rsi", 50.0)))
+        if "short_term_rvol" not in d:
+            d["short_term_rvol"] = float(d.get("short_term_rvol", d.get("volume_ratio", 1.0)))
+        if "ema_spread_pct" not in d:
+            d["ema_spread_pct"] = float(d.get("ema_spread_pct", 0.0))
+        if "short_term_momentum_score" not in d:
+            d["short_term_momentum_score"] = float(d.get("short_term_momentum_score", 50.0))
+        if "short_term_setup" not in d:
+            d["short_term_setup"] = str(d.get("short_term_setup", "MOMENTUM_CONSOLIDATION"))
+        if "is_short_term_breakout" not in d:
+            d["is_short_term_breakout"] = bool(d.get("is_short_term_breakout", False))
         return d
 
     plan = rec.trade_plan
@@ -137,6 +155,15 @@ def recommendation_to_dict(
     tightness = getattr(rec, "consolidation_tightness", 50.0)
     accum_rating = getattr(rec, "accumulation_rating", "B")
     up_down_ratio = getattr(rec, "up_down_volume_ratio", 1.0)
+    roc_3d = getattr(rec, "roc_3d", 0.0)
+    roc_5d = getattr(rec, "roc_5d", 0.0)
+    roc_10d = getattr(rec, "roc_10d", 0.0)
+    st_rsi = getattr(rec, "short_term_rsi", rsi)
+    st_rvol = getattr(rec, "short_term_rvol", volume_ratio)
+    ema_spread = getattr(rec, "ema_spread_pct", 0.0)
+    st_score = getattr(rec, "short_term_momentum_score", 50.0)
+    st_setup = getattr(rec, "short_term_setup", "MOMENTUM_CONSOLIDATION")
+    is_st_breakout = getattr(rec, "is_short_term_breakout", False)
 
     return {
         "symbol": rec.symbol,
@@ -165,6 +192,15 @@ def recommendation_to_dict(
         "consolidation_tightness": round(float(tightness), 1),
         "accumulation_rating": str(accum_rating),
         "up_down_volume_ratio": round(float(up_down_ratio), 2),
+        "roc_3d": round(float(roc_3d), 2),
+        "roc_5d": round(float(roc_5d), 2),
+        "roc_10d": round(float(roc_10d), 2),
+        "short_term_rsi": round(float(st_rsi), 1),
+        "short_term_rvol": round(float(st_rvol), 2),
+        "ema_spread_pct": round(float(ema_spread), 2),
+        "short_term_momentum_score": round(float(st_score), 1),
+        "short_term_setup": str(st_setup),
+        "is_short_term_breakout": bool(is_st_breakout),
     }
 
 
@@ -256,6 +292,15 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             "consolidation_tightness": 88.0,
             "accumulation_rating": "A+",
             "up_down_volume_ratio": 2.10,
+            "roc_3d": 4.85,
+            "roc_5d": 7.20,
+            "roc_10d": 11.40,
+            "short_term_rsi": 68.5,
+            "short_term_rvol": 1.62,
+            "ema_spread_pct": 3.40,
+            "short_term_momentum_score": 94.0,
+            "short_term_setup": "VELOCITY_BREAKOUT",
+            "is_short_term_breakout": True,
         },
         {
             "symbol": "TSLA",
@@ -298,6 +343,15 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             "consolidation_tightness": 68.0,
             "accumulation_rating": "A+",
             "up_down_volume_ratio": 1.65,
+            "roc_3d": 5.40,
+            "roc_5d": 8.10,
+            "roc_10d": 13.50,
+            "short_term_rsi": 71.0,
+            "short_term_rvol": 1.55,
+            "ema_spread_pct": 3.80,
+            "short_term_momentum_score": 92.5,
+            "short_term_setup": "VELOCITY_BREAKOUT",
+            "is_short_term_breakout": True,
         },
         {
             "symbol": "META",
@@ -508,6 +562,15 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             "consolidation_tightness": 70.0,
             "accumulation_rating": "A+",
             "up_down_volume_ratio": 1.75,
+            "roc_3d": 6.20,
+            "roc_5d": 9.40,
+            "roc_10d": 14.10,
+            "short_term_rsi": 72.4,
+            "short_term_rvol": 1.70,
+            "ema_spread_pct": 4.10,
+            "short_term_momentum_score": 95.0,
+            "short_term_setup": "VELOCITY_BREAKOUT",
+            "is_short_term_breakout": True,
         },
         {
             "symbol": "FCX",
@@ -948,6 +1011,24 @@ class StockScreenerCache:
                 elif strat_norm in ("pullback", "pullback_dips", "dip_buy", "dips"):
                     if not (tag == "pullback_dip" or rsi_val <= 45.0):
                         continue
+                elif strat_norm in ("velocity", "short_term_velocity", "velocity_breakout", "velocity_breakouts", "roc"):
+                    roc3 = float(item.get("roc_3d", 0.0))
+                    st_set = str(item.get("short_term_setup", "")).lower()
+                    if not (roc3 >= 2.5 or st_set in ("velocity_breakout", "ema_8_21_expansion") or tag == "velocity_breakout"):
+                        continue
+                elif strat_norm in ("rvol", "rvol_surge", "rvol_surges", "volume_surges"):
+                    rvol = float(item.get("short_term_rvol", item.get("volume_ratio", 1.0)))
+                    st_set = str(item.get("short_term_setup", "")).lower()
+                    if not (rvol >= 1.35 or st_set == "volume_surge"):
+                        continue
+                elif strat_norm in ("ema_momentum", "ema_expansion", "ema_ribbon", "8_21_ema"):
+                    spread = float(item.get("ema_spread_pct", 0.0))
+                    st_set = str(item.get("short_term_setup", "")).lower()
+                    if not (spread >= 1.0 or "ema" in st_set):
+                        continue
+                elif strat_norm in ("short_breakouts", "10d_breakout", "st_breakout"):
+                    if not bool(item.get("is_short_term_breakout", False)):
+                        continue
 
             # 4. Search query
             if q_norm is not None:
@@ -962,6 +1043,16 @@ class StockScreenerCache:
         sort_field = (sort_by or "score").strip().lower()
         if sort_field in ("score", "composite_score"):
             filtered.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+        elif sort_field in ("short_term_momentum", "short_term_score", "velocity_score", "st_score"):
+            filtered.sort(key=lambda x: x.get("short_term_momentum_score", 50.0), reverse=True)
+        elif sort_field in ("roc_3d", "roc3", "velocity_3d", "roc"):
+            filtered.sort(key=lambda x: x.get("roc_3d", 0.0), reverse=True)
+        elif sort_field in ("roc_5d", "roc5", "velocity_5d"):
+            filtered.sort(key=lambda x: x.get("roc_5d", 0.0), reverse=True)
+        elif sort_field in ("rvol", "short_term_rvol", "rvol_5d"):
+            filtered.sort(key=lambda x: x.get("short_term_rvol", x.get("volume_ratio", 1.0)), reverse=True)
+        elif sort_field in ("ema_spread", "ema_spread_pct"):
+            filtered.sort(key=lambda x: x.get("ema_spread_pct", 0.0), reverse=True)
         elif sort_field in ("symbol", "ticker"):
             filtered.sort(key=lambda x: x.get("symbol", ""))
         elif sort_field in ("price", "current_price"):

@@ -1,5 +1,11 @@
 """Technical, sentiment, and quantitative risk modeling package."""
 
+from analysis.momentum import (
+    MomentumResult,
+    ShortTermMomentumResult,
+    analyze_momentum,
+    calculate_short_term_momentum,
+)
 from analysis.stock_suggester import (
     TradeHorizon,
     StockTradePlan,
@@ -18,6 +24,10 @@ from analysis.monte_carlo import (
 )
 
 __all__ = [
+    "MomentumResult",
+    "ShortTermMomentumResult",
+    "analyze_momentum",
+    "calculate_short_term_momentum",
     "TradeHorizon",
     "StockTradePlan",
     "StockRecommendation",

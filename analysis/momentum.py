@@ -241,3 +241,222 @@ def analyze_momentum(
             "weekly_sma10": weekly_info["weekly_sma10"],
         }
     )
+
+
+
+@dataclass
+class ShortTermMomentumResult:
+    """Short-term momentum metrics specifically designed for 1-10 day swing and breakout selection."""
+    roc_3d: float                      # 3-Day Rate of Change (%)
+    roc_5d: float                      # 5-Day Rate of Change (%)
+    roc_10d: float                     # 10-Day Rate of Change (%)
+    short_term_rsi: float              # 5-period fast RSI
+    short_term_rvol: float             # 5-Day Relative Volume Ratio (RVOL)
+    ema_8: float                       # 8-period Exponential Moving Average
+    ema_21: float                      # 21-period Exponential Moving Average
+    ema_spread_pct: float              # ((EMA8 - EMA21) / EMA21) * 100
+    ema_alignment: str                 # "BULLISH_EXPANSION", "BULL_CROSS", "BEARISH_EXPANSION", "BEAR_CROSS", "NEUTRAL"
+    distance_from_10d_high_pct: float  # Proximity to 10-day high (0.0% = at high)
+    distance_from_20d_high_pct: float  # Proximity to 20-day high (0.0% = at high)
+    is_short_term_breakout: bool       # Price within 1.0% of 10-day high with RVOL >= 1.2
+    short_term_momentum_score: float   # 0 to 100 composite score tailored for short-term selection
+    short_term_setup: str              # "VELOCITY_BREAKOUT", "EMA_8_21_EXPANSION", "PULLBACK_BOUNCE", "VOLUME_SURGE", "MOMENTUM_CONSOLIDATION"
+    details: Dict[str, Any]
+
+
+def calculate_short_term_momentum(
+    df: Optional[pd.DataFrame] = None,
+    current_price: float = 100.0,
+    volume_ratio: float = 1.0,
+    momentum_score: float = 0.0,
+    rsi_14: float = 50.0,
+) -> ShortTermMomentumResult:
+    """Calculate dedicated short-term momentum metrics for high-velocity stock selection.
+
+    Evaluates:
+    - 3-day, 5-day, and 10-day price velocity (Rate of Change / ROC)
+    - 5-period fast RSI impulse
+    - 5-day short-term relative volume (RVOL)
+    - 8 EMA vs 21 EMA ribbon spread and crossover alignment
+    - 10-day and 20-day breakout proximity
+    - Normalized 0-100 short-term momentum composite score
+    """
+    price = max(0.01, current_price)
+    roc_3d = 0.0
+    roc_5d = 0.0
+    roc_10d = 0.0
+    short_term_rsi = rsi_14
+    short_term_rvol = volume_ratio
+    ema_8 = price
+    ema_21 = price
+    ema_spread_pct = 0.0
+    ema_alignment = "NEUTRAL"
+    dist_10d_high = 0.0
+    dist_20d_high = 0.0
+
+    if df is not None and not df.empty and len(df) >= 5:
+        try:
+            close = df["Close"]
+            cur_close = float(close.iloc[-1])
+            price = cur_close
+
+            # 1. Price Velocity (ROC)
+            if len(close) >= 4:
+                p_3d_ago = float(close.iloc[-4])
+                if p_3d_ago > 0:
+                    roc_3d = ((cur_close - p_3d_ago) / p_3d_ago) * 100.0
+
+            if len(close) >= 6:
+                p_5d_ago = float(close.iloc[-6])
+                if p_5d_ago > 0:
+                    roc_5d = ((cur_close - p_5d_ago) / p_5d_ago) * 100.0
+
+            if len(close) >= 11:
+                p_10d_ago = float(close.iloc[-11])
+                if p_10d_ago > 0:
+                    roc_10d = ((cur_close - p_10d_ago) / p_10d_ago) * 100.0
+            else:
+                roc_10d = roc_5d * 1.5
+
+            # 2. Fast 5-period RSI
+            if len(close) >= 6:
+                short_term_rsi = float(calculate_rsi(close, period=5).iloc[-1])
+
+            # 3. 5-day RVOL
+            if "Volume" in df.columns:
+                vol = df["Volume"]
+                cur_vol = float(vol.iloc[-1])
+                w_5 = min(len(vol), 5)
+                vol_5d_mean = float(vol.iloc[-w_5:].mean())
+                if vol_5d_mean > 0:
+                    short_term_rvol = cur_vol / vol_5d_mean
+
+            # 4. 8 EMA vs 21 EMA Ribbon
+            ema_8_series = close.ewm(span=8, adjust=False).mean()
+            ema_21_series = close.ewm(span=21, adjust=False).mean()
+
+            ema_8 = float(ema_8_series.iloc[-1])
+            ema_21 = float(ema_21_series.iloc[-1])
+
+            if ema_21 > 0:
+                ema_spread_pct = ((ema_8 - ema_21) / ema_21) * 100.0
+
+            if len(ema_8_series) >= 2 and len(ema_21_series) >= 2:
+                prev_ema_8 = float(ema_8_series.iloc[-2])
+                prev_ema_21 = float(ema_21_series.iloc[-2])
+
+                if ema_8 > ema_21:
+                    if prev_ema_8 <= prev_ema_21:
+                        ema_alignment = "BULL_CROSS"
+                    else:
+                        ema_alignment = "BULLISH_EXPANSION"
+                elif ema_8 < ema_21:
+                    if prev_ema_8 >= prev_ema_21:
+                        ema_alignment = "BEAR_CROSS"
+                    else:
+                        ema_alignment = "BEARISH_EXPANSION"
+                else:
+                    ema_alignment = "NEUTRAL"
+            else:
+                ema_alignment = "BULLISH_EXPANSION" if ema_8 >= ema_21 else "BEARISH_EXPANSION"
+
+            # 5. Breakout Proximity (10-day & 20-day high)
+            high = df["High"]
+            w_10 = min(len(high), 10)
+            high_10d = float(high.iloc[-w_10:].max())
+            if high_10d > 0:
+                dist_10d_high = ((cur_close - high_10d) / high_10d) * 100.0
+
+            w_20 = min(len(high), 20)
+            high_20d = float(high.iloc[-w_20:].max())
+            if high_20d > 0:
+                dist_20d_high = ((cur_close - high_20d) / high_20d) * 100.0
+
+        except Exception:
+            pass
+    else:
+        # Fallback estimation using general momentum inputs
+        roc_3d = momentum_score * 4.0
+        roc_5d = momentum_score * 6.0
+        roc_10d = momentum_score * 8.5
+        short_term_rsi = rsi_14
+        short_term_rvol = volume_ratio
+        ema_spread_pct = momentum_score * 3.0
+        ema_8 = price * (1.0 + (momentum_score * 0.015))
+        ema_21 = price * (1.0 - (momentum_score * 0.015))
+        ema_alignment = "BULLISH_EXPANSION" if momentum_score > 0.15 else "NEUTRAL"
+        dist_10d_high = -1.5 if momentum_score > 0.3 else -4.0
+        dist_20d_high = -2.5 if momentum_score > 0.3 else -6.0
+
+    # Short-Term Breakout Detection
+    is_short_term_breakout = bool(dist_10d_high >= -1.0 and (short_term_rvol >= 1.20 or volume_ratio >= 1.20))
+
+    # Composite Short-Term Momentum Score (0 to 100)
+    score_acc = 50.0
+    # Velocity contribution (+- 15 pts)
+    score_acc += max(-15.0, min(15.0, roc_3d * 2.2))
+    score_acc += max(-10.0, min(10.0, roc_5d * 1.2))
+
+    # EMA Ribbon Spread (+- 12 pts)
+    score_acc += max(-12.0, min(12.0, ema_spread_pct * 3.5))
+
+    # Short-Term Volume Surge (+- 12 pts)
+    if short_term_rvol >= 1.5:
+        score_acc += 10.0
+    elif short_term_rvol >= 1.2:
+        score_acc += 5.0
+    elif short_term_rvol < 0.8:
+        score_acc -= 6.0
+
+    # Fast RSI alignment (Sweet spot 55-75 = strong momentum impulse)
+    if 55.0 <= short_term_rsi <= 75.0:
+        score_acc += 8.0
+    elif short_term_rsi > 75.0:
+        score_acc += 4.0  # Slightly overbought but still high velocity
+    elif short_term_rsi < 35.0:
+        score_acc -= 7.0
+
+    # Breakout bonus
+    if is_short_term_breakout:
+        score_acc += 8.0
+    elif dist_10d_high >= -2.0:
+        score_acc += 4.0
+
+    short_term_score = round(max(5.0, min(99.0, score_acc)), 1)
+
+    # Classify Short-Term Setup
+    if is_short_term_breakout and roc_3d >= 2.5 and short_term_rvol >= 1.25:
+        short_term_setup = "VELOCITY_BREAKOUT"
+    elif ema_alignment == "BULL_CROSS":
+        short_term_setup = "EMA_8_21_BULL_CROSS"
+    elif ema_alignment == "BULLISH_EXPANSION" and ema_spread_pct >= 1.2:
+        short_term_setup = "EMA_8_21_EXPANSION"
+    elif short_term_rvol >= 1.50 and roc_3d >= 1.0:
+        short_term_setup = "VOLUME_SURGE"
+    elif short_term_rsi <= 44.0 and ema_8 >= ema_21 * 0.98:
+        short_term_setup = "PULLBACK_BOUNCE"
+    else:
+        short_term_setup = "MOMENTUM_CONSOLIDATION"
+
+    return ShortTermMomentumResult(
+        roc_3d=round(roc_3d, 2),
+        roc_5d=round(roc_5d, 2),
+        roc_10d=round(roc_10d, 2),
+        short_term_rsi=round(short_term_rsi, 1),
+        short_term_rvol=round(short_term_rvol, 2),
+        ema_8=round(ema_8, 2),
+        ema_21=round(ema_21, 2),
+        ema_spread_pct=round(ema_spread_pct, 2),
+        ema_alignment=ema_alignment,
+        distance_from_10d_high_pct=round(dist_10d_high, 1),
+        distance_from_20d_high_pct=round(dist_20d_high, 1),
+        is_short_term_breakout=is_short_term_breakout,
+        short_term_momentum_score=short_term_score,
+        short_term_setup=short_term_setup,
+        details={
+            "dist_10d_high": round(dist_10d_high, 1),
+            "dist_20d_high": round(dist_20d_high, 1),
+            "ema_8": round(ema_8, 2),
+            "ema_21": round(ema_21, 2),
+        }
+    )

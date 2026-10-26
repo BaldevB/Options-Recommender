@@ -407,3 +407,59 @@ def test_analysis_package_level_exports():
     assert hasattr(analysis, "StockRecommendation")
     assert hasattr(analysis, "generate_stock_recommendation")
     assert hasattr(analysis, "calculate_stock_shares")
+
+
+def test_calculate_short_term_momentum():
+    from analysis.momentum import calculate_short_term_momentum, ShortTermMomentumResult
+    # Create trending upward price dataframe with high volume surge
+    dates = pd.date_range("2024-01-01", periods=15, freq="B")
+    closes = [100.0, 101.0, 102.0, 102.5, 103.0, 104.0, 104.5, 105.0, 106.0, 107.0, 108.0, 110.0, 112.0, 115.0, 118.0]
+    highs = [c + 1.0 for c in closes]
+    lows = [c - 1.0 for c in closes]
+    # Recent volume surge
+    volumes = [1000000] * 12 + [2000000, 2500000, 3000000]
+
+    df_surge = pd.DataFrame({
+        "Open": closes,
+        "High": highs,
+        "Low": lows,
+        "Close": closes,
+        "Volume": volumes,
+    }, index=dates)
+
+    st = calculate_short_term_momentum(df=df_surge, current_price=118.0)
+    assert isinstance(st, ShortTermMomentumResult)
+    assert st.roc_3d > 5.0  # 110 to 118 is > 7%
+    assert st.roc_5d > 8.0
+    assert st.short_term_rvol >= 1.2
+    assert st.ema_spread_pct > 0.0
+    assert st.short_term_momentum_score >= 70.0
+    assert st.is_short_term_breakout is True
+    assert st.short_term_setup in ("VELOCITY_BREAKOUT", "EMA_8_21_EXPANSION", "VOLUME_SURGE")
+
+
+def test_screener_cache_short_term_momentum_filtering_and_sorting():
+    from analysis.screener_cache import StockScreenerCache
+    cache = StockScreenerCache(seed_defaults=True)
+
+    # Filter: velocity
+    res_vel = cache.get_recommendations(strategy="velocity")
+    assert res_vel["total"] > 0
+    for it in res_vel["items"]:
+        assert it.get("roc_3d", 0) >= 2.5 or it.get("short_term_setup") in ("VELOCITY_BREAKOUT", "EMA_8_21_EXPANSION")
+
+    # Filter: rvol
+    res_rvol = cache.get_recommendations(strategy="rvol")
+    assert res_rvol["total"] > 0
+    for it in res_rvol["items"]:
+        assert it.get("short_term_rvol", 1.0) >= 1.35 or it.get("short_term_setup") == "VOLUME_SURGE"
+
+    # Sort by: short_term_momentum
+    res_sorted_st = cache.get_recommendations(sort_by="short_term_momentum")
+    scores = [it.get("short_term_momentum_score", 50.0) for it in res_sorted_st["items"]]
+    assert scores == sorted(scores, reverse=True)
+
+    # Sort by: roc_3d
+    res_sorted_roc = cache.get_recommendations(sort_by="roc_3d")
+    rocs = [it.get("roc_3d", 0.0) for it in res_sorted_roc["items"]]
+    assert rocs == sorted(rocs, reverse=True)

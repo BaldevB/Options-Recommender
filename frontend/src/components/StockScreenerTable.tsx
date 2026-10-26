@@ -190,6 +190,22 @@ export default function StockScreenerTable({
               </th>
               <th
                 scope="col"
+                className="py-3 px-3 text-right cursor-pointer hover:text-cyan-400 transition-colors"
+                onClick={() => onSort("roc_3d")}
+                title="3-Day Price Velocity Rate of Change (%)"
+              >
+                3D ROC {renderSortIcon("roc_3d")}
+              </th>
+              <th
+                scope="col"
+                className="py-3 px-3 text-center cursor-pointer hover:text-cyan-400 transition-colors"
+                onClick={() => onSort("short_term_momentum")}
+                title="Short-Term Momentum Score (0-100) & Impulse Setup"
+              >
+                ST Impulse {renderSortIcon("short_term_momentum")}
+              </th>
+              <th
+                scope="col"
                 className="py-3 px-3 text-center cursor-pointer hover:text-cyan-400 transition-colors"
                 onClick={() => onSort("stage_2")}
                 title="Minervini Stage 2 Superperformance Trend Template"
@@ -353,6 +369,54 @@ export default function StockScreenerTable({
                         {isPositive ? "+" : ""}
                         {stock.change_pct.toFixed(2)}%
                       </span>
+                    </td>
+
+                    {/* 3D ROC Velocity */}
+                    <td className="py-3 px-3 text-right font-mono font-semibold">
+                      {stock.roc_3d !== undefined ? (
+                        <span
+                          className={`inline-flex items-center gap-0.5 ${
+                            stock.roc_3d >= 3.0
+                              ? "text-cyan-300 font-bold"
+                              : stock.roc_3d >= 0
+                              ? "text-emerald-400"
+                              : "text-rose-400"
+                          }`}
+                        >
+                          {stock.roc_3d >= 0 ? "+" : ""}
+                          {stock.roc_3d.toFixed(1)}%
+                        </span>
+                      ) : (
+                        <span className="text-slate-500">—</span>
+                      )}
+                    </td>
+
+                    {/* Short-Term Impulse Setup */}
+                    <td className="py-3 px-3 text-center font-mono">
+                      {stock.short_term_setup ? (
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                            stock.short_term_setup === "VELOCITY_BREAKOUT"
+                              ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-[0_0_6px_rgba(6,182,212,0.2)]"
+                              : stock.short_term_setup.includes("EMA")
+                              ? "bg-purple-500/20 text-purple-300 border border-purple-500/40"
+                              : stock.short_term_setup === "VOLUME_SURGE"
+                              ? "bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                              : "bg-slate-800 text-slate-400 border border-slate-700"
+                          }`}
+                          title={`Score: ${stock.short_term_momentum_score ?? 50}/100 | RVOL: ${stock.short_term_rvol ?? 1.0}x`}
+                        >
+                          {stock.short_term_setup === "VELOCITY_BREAKOUT"
+                            ? "⚡ Breakout"
+                            : stock.short_term_setup.includes("EMA")
+                            ? "🚀 8/21 EMA"
+                            : stock.short_term_setup === "VOLUME_SURGE"
+                            ? "🔥 Vol Surge"
+                            : "Steady"}
+                        </span>
+                      ) : (
+                        <span className="text-slate-500 text-[11px]">—</span>
+                      )}
                     </td>
 
                     {/* Minervini Stage 2 */}

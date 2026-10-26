@@ -543,6 +543,9 @@ function StockRecommendationsContent() {
               { id: "breakouts", label: "🚀 52W Breakouts (< 5%)", highlight: "amber" },
               { id: "golden_cross", label: "🌟 Golden Cross", highlight: "purple" },
               { id: "pullback", label: "🎯 Pullback Dips", highlight: "emerald" },
+              { id: "velocity", label: "⚡ Velocity (3D ROC)", highlight: "cyan" },
+              { id: "rvol", label: "💥 RVOL Surges (> 1.35x)", highlight: "amber" },
+              { id: "ema_momentum", label: "🚀 8/21 EMA Expansion", highlight: "purple" },
             ].map((strat) => {
               const isActive = activeStrategy === strat.id;
               return (
@@ -618,6 +621,10 @@ function StockRecommendationsContent() {
                 className="rounded-xl bg-slate-900 border border-slate-700/80 px-3 py-1.5 text-xs text-slate-200 focus:border-cyan-500 focus:outline-none cursor-pointer"
               >
                 <option value="score">Quant Score (Highest)</option>
+                <option value="short_term_momentum">⚡ Short-Term Momentum Score (0-100)</option>
+                <option value="roc_3d">🚀 3-Day Velocity (ROC %)</option>
+                <option value="rvol">💥 5-Day Relative Volume (RVOL)</option>
+                <option value="ema_spread">📈 8/21 EMA Spread (%)</option>
                 <option value="stage_2">🔥 Minervini Stage 2 (Leaders First)</option>
                 <option value="accumulation">💎 Institutional Inflow (A/D Ratio)</option>
                 <option value="vcp">⚡ VCP Squeeze Tightness</option>
@@ -954,6 +961,84 @@ function StockRecommendationsContent() {
                   </div>
                 </div>
               </div>
+
+              {/* Short-Term Momentum Impulse Panel */}
+              {(deepDiveStock.roc_3d !== undefined || deepDiveStock.short_term_momentum_score !== undefined) && (
+                <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-xs uppercase font-bold text-cyan-400 tracking-wider flex items-center gap-1.5">
+                      <Zap className="w-4 h-4 text-cyan-400" />
+                      Short-Term Momentum &amp; Velocity Impulse
+                    </h3>
+                    {deepDiveStock.short_term_setup && (
+                      <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">
+                        ⚡ {deepDiveStock.short_term_setup.replace(/_/g, " ")}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                    <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
+                      <span className="text-[10px] text-slate-400 uppercase block">3-Day Velocity (ROC)</span>
+                      <span className={`font-mono font-bold text-sm ${
+                        (deepDiveStock.roc_3d ?? 0) >= 2.5
+                          ? "text-cyan-300"
+                          : (deepDiveStock.roc_3d ?? 0) >= 0
+                          ? "text-emerald-400"
+                          : "text-rose-400"
+                      }`}>
+                        {(deepDiveStock.roc_3d ?? 0) >= 0 ? "+" : ""}{(deepDiveStock.roc_3d ?? 0).toFixed(2)}%
+                      </span>
+                    </div>
+
+                    <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
+                      <span className="text-[10px] text-slate-400 uppercase block">5-Day Rate of Change</span>
+                      <span className={`font-mono font-bold text-sm ${
+                        (deepDiveStock.roc_5d ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"
+                      }`}>
+                        {(deepDiveStock.roc_5d ?? 0) >= 0 ? "+" : ""}{(deepDiveStock.roc_5d ?? 0).toFixed(2)}%
+                      </span>
+                    </div>
+
+                    <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
+                      <span className="text-[10px] text-slate-400 uppercase block">5-Day Relative Volume</span>
+                      <span className="font-mono font-bold text-amber-300 text-sm">
+                        {(deepDiveStock.short_term_rvol ?? deepDiveStock.volume_ratio).toFixed(2)}x
+                      </span>
+                    </div>
+
+                    <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
+                      <span className="text-[10px] text-slate-400 uppercase block">8/21 EMA Spread</span>
+                      <span className="font-mono font-bold text-purple-300 text-sm">
+                        {(deepDiveStock.ema_spread_pct ?? 0) >= 0 ? "+" : ""}{(deepDiveStock.ema_spread_pct ?? 0).toFixed(2)}%
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs pt-1">
+                    <div className="p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/80">
+                      <span className="text-[10px] text-slate-400 uppercase block">Short-Term Score</span>
+                      <span className="font-mono font-bold text-cyan-300">
+                        {Math.round(deepDiveStock.short_term_momentum_score ?? 50)}/100
+                      </span>
+                    </div>
+
+                    <div className="p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/80">
+                      <span className="text-[10px] text-slate-400 uppercase block">Fast RSI (5-Period)</span>
+                      <span className="font-mono font-bold text-slate-200">
+                        {(deepDiveStock.short_term_rsi ?? deepDiveStock.rsi).toFixed(1)}
+                      </span>
+                    </div>
+
+                    <div className="p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/80">
+                      <span className="text-[10px] text-slate-400 uppercase block">10-Day High Breakout</span>
+                      <span className="font-mono font-bold text-emerald-400">
+                        {deepDiveStock.is_short_term_breakout ? "🚀 Active Breakout" : "Near Range"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Rationale & News Sentiment */}
               {deepDiveStock.rationale && deepDiveStock.rationale.length > 0 && (

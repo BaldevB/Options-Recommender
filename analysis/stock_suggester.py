@@ -21,7 +21,7 @@ from typing import Tuple, List, Dict, Any, Optional, Union
 import numpy as np
 import pandas as pd
 
-from analysis.momentum import MomentumResult
+from analysis.momentum import MomentumResult, ShortTermMomentumResult, calculate_short_term_momentum
 from analysis.sentiment import SentimentResult
 from data.price_data import QuoteData
 from data.stock_universe import get_stock_metadata
@@ -70,6 +70,15 @@ class StockRecommendation:
     consolidation_tightness: float = 50.0
     accumulation_rating: str = "B"
     up_down_volume_ratio: float = 1.0
+    roc_3d: float = 0.0
+    roc_5d: float = 0.0
+    roc_10d: float = 0.0
+    short_term_rsi: float = 50.0
+    short_term_rvol: float = 1.0
+    ema_spread_pct: float = 0.0
+    short_term_momentum_score: float = 50.0
+    short_term_setup: str = "MOMENTUM_CONSOLIDATION"
+    is_short_term_breakout: bool = False
 
 
 def calculate_atr(
@@ -778,6 +787,14 @@ def generate_stock_recommendation(
     vol_ratio = getattr(momentum, "volume_ratio", 1.0) if momentum is not None else 1.0
     rsi_val = getattr(momentum, "rsi", 50.0) if momentum is not None else 50.0
 
+    st_mom = calculate_short_term_momentum(
+        df=df,
+        current_price=current_price,
+        volume_ratio=vol_ratio,
+        momentum_score=mom_score,
+        rsi_14=rsi_val,
+    )
+
     # Institutional quantitative criteria
     is_stage_2 = evaluate_minervini_stage_2(
         df=df,
@@ -879,6 +896,14 @@ def generate_stock_recommendation(
 
     rationale.append(f"Institutional Flow: {accumulation_rating} Rating (Up/Down Volume Ratio: {up_down_volume_ratio:.2f}x).")
 
+    if st_mom.short_term_setup in ("VELOCITY_BREAKOUT", "EMA_8_21_EXPANSION", "VOLUME_SURGE", "EMA_8_21_BULL_CROSS"):
+        rationale.append(
+            f"Short-Term Impulse: {st_mom.short_term_setup.replace('_', ' ')} "
+            f"(3D ROC: {st_mom.roc_3d:+.1f}%, 5D RVOL: {st_mom.short_term_rvol:.2f}x, 8/21 EMA Spread: {st_mom.ema_spread_pct:+.1f}%)."
+        )
+    if st_mom.is_short_term_breakout:
+        rationale.append(f"Short-Term Breakout: Within {abs(st_mom.distance_from_10d_high_pct):.1f}% of 10-day rolling high with volume confirmation.")
+
     if momentum is not None:
         rationale.append(f"Momentum: Score {mom_score:+.2f} ({momentum.trend_description})")
         rationale.append(f"Indicators: RSI-14 {momentum.rsi:.1f} | MACD Hist {momentum.macd_hist:+.3f}")
@@ -923,4 +948,13 @@ def generate_stock_recommendation(
         consolidation_tightness=consolidation_tightness,
         accumulation_rating=accumulation_rating,
         up_down_volume_ratio=up_down_volume_ratio,
+        roc_3d=st_mom.roc_3d,
+        roc_5d=st_mom.roc_5d,
+        roc_10d=st_mom.roc_10d,
+        short_term_rsi=st_mom.short_term_rsi,
+        short_term_rvol=st_mom.short_term_rvol,
+        ema_spread_pct=st_mom.ema_spread_pct,
+        short_term_momentum_score=st_mom.short_term_momentum_score,
+        short_term_setup=st_mom.short_term_setup,
+        is_short_term_breakout=st_mom.is_short_term_breakout,
     )

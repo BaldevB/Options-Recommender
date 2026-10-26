@@ -56,6 +56,15 @@ export interface StockRecommendationItem {
   consolidation_tightness?: number;
   accumulation_rating?: string;
   up_down_volume_ratio?: number;
+  roc_3d?: number;
+  roc_5d?: number;
+  roc_10d?: number;
+  short_term_rsi?: number;
+  short_term_rvol?: number;
+  ema_spread_pct?: number;
+  short_term_momentum_score?: number;
+  short_term_setup?: string;
+  is_short_term_breakout?: boolean;
 }
 
 interface StockCardProps {
@@ -379,6 +388,56 @@ export default function StockCard({
             </span>
           )}
         </div>
+
+        {/* Short-Term Momentum Impulse Strip */}
+        {(stock.roc_3d !== undefined || stock.short_term_momentum_score !== undefined) && (
+          <div className="flex flex-wrap items-center gap-1.5 mt-2 pt-2 border-t border-slate-800/60 text-[11px] font-mono">
+            {stock.roc_3d !== undefined && (
+              <span
+                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded font-bold ${
+                  stock.roc_3d >= 3.0
+                    ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-[0_0_6px_rgba(6,182,212,0.2)]"
+                    : stock.roc_3d >= 0
+                    ? "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                    : "bg-rose-500/15 text-rose-300 border border-rose-500/30"
+                }`}
+                title="3-Day Price Rate of Change (Short-Term Velocity)"
+              >
+                <Zap className="w-3 h-3 text-cyan-400" />
+                3D: {stock.roc_3d >= 0 ? "+" : ""}{stock.roc_3d.toFixed(1)}%
+              </span>
+            )}
+
+            {stock.short_term_rvol !== undefined && (
+              <span
+                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded ${
+                  stock.short_term_rvol >= 1.35
+                    ? "bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold"
+                    : "bg-slate-800/80 text-slate-300 border border-slate-700/60 font-medium"
+                }`}
+                title="5-Day Relative Volume (RVOL)"
+              >
+                <Flame className="w-3 h-3 text-amber-400" />
+                {stock.short_term_rvol.toFixed(1)}x RVOL
+              </span>
+            )}
+
+            {stock.ema_spread_pct !== undefined && (
+              <span
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded font-medium bg-purple-500/15 text-purple-300 border border-purple-500/30"
+                title="8 EMA vs 21 EMA Ribbon Spread (%)"
+              >
+                8/21 EMA: {stock.ema_spread_pct >= 0 ? "+" : ""}{stock.ema_spread_pct.toFixed(1)}%
+              </span>
+            )}
+
+            {stock.short_term_setup && stock.short_term_setup !== "MOMENTUM_CONSOLIDATION" && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded font-bold text-[10px] bg-cyan-950/50 text-cyan-200 border border-cyan-700/50">
+                ⚡ {stock.short_term_setup.replace(/_/g, " ")}
+              </span>
+            )}
+          </div>
+        )}
 
         {/* Score & Confidence Bar */}
         <div className="mt-3 p-2.5 rounded-lg bg-[#080d1a] border border-slate-800/80">
