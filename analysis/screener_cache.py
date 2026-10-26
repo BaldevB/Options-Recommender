@@ -5,6 +5,8 @@ supporting sub-second multi-parameter filtering (horizon, sector, search, strate
 multi-column sorting, pagination, on-demand deep-dive analysis, and background batch refreshes.
 """
 
+import gc
+import os
 from dataclasses import asdict
 from datetime import datetime, timezone
 import logging
@@ -1128,7 +1130,7 @@ class StockScreenerCache:
         self,
         force: bool = False,
         tickers: Optional[List[str]] = None,
-        chunk_size: int = 100,
+        chunk_size: int = 25,
     ) -> Dict[str, Any]:
         """Perform batch historical price downloads, compute momentum & trade plans, and refresh cache.
 
@@ -1153,7 +1155,9 @@ class StockScreenerCache:
                 # Order priority market leaders first so they appear immediately
                 priorities = [t for t in PRIORITY_LEADER_TICKERS if t in all_tickers]
                 remaining = [t for t in all_tickers if t not in PRIORITY_LEADER_TICKERS]
-                clean_tickers = priorities + remaining
+                # On cloud containers (e.g. Render 512MB RAM), cap background scan to prevent OOM restart
+                max_scan = int(os.environ.get("MAX_SCREENER_SCAN_TICKERS", "75"))
+                clean_tickers = (priorities + remaining)[:max_scan]
             else:
                 all_tickers = [t.strip().upper() for t in tickers if t and t.strip()]
                 clean_tickers = list(dict.fromkeys(all_tickers))
@@ -1170,7 +1174,7 @@ class StockScreenerCache:
                         period="3mo",
                         interval="1d",
                         group_by="ticker",
-                        threads=True,
+                        threads=False,
                         progress=False,
                     )
                 except Exception as exc:
@@ -1251,6 +1255,12 @@ class StockScreenerCache:
                         self._last_updated_ts = time.time()
                         self._status = "ready"
 
+                # Release DataFrame and collect garbage to avoid memory accumulation
+                del data
+                del chunk_recs
+                gc.collect()
+                time.sleep(0.2)
+
             if recs:
                 if tickers is not None:
                     self._set_cached_items(recs)
@@ -1315,14 +1325,19 @@ class StockScreenerCache:
             logger.info("Stock screener background worker stopped.")
 
     def _worker_loop(self) -> None:
-        """Periodic background refresh worker loop."""
+        """Periodic background refresh worker loop with startup warmup delay."""
+        # Initial sleep on startup so health check passes and API starts cleanly without memory spikes
+        if self._stop_worker_event.wait(timeout=60):
+            return
+
         while not self._stop_worker_event.is_set():
             try:
                 self.refresh_cache()
             except Exception as exc:
                 logger.error("Error in screener cache background refresh: %s", exc)
 
-            sleep_secs = max(10, self._worker_interval_minutes * 60)
+            gc.collect()
+            sleep_secs = max(60, self._worker_interval_minutes * 60)
             if self._stop_worker_event.wait(timeout=sleep_secs):
                 break
 

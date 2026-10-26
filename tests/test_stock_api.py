@@ -259,3 +259,27 @@ def test_api_lifespan_starts_worker():
         assert resp.status_code == 200
         data = resp.json()
         assert data["worker_running"] is True
+
+
+def test_api_health_endpoint_memory_reporting():
+    """Health check endpoint returns status ok and memory dictionary."""
+    with TestClient(app) as client:
+        resp = client.get("/api/health")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert "timestamp" in data
+        assert "memory" in data
+
+
+def test_bounded_price_cache_eviction():
+    """Verify price data cache evicts oldest entries and remains bounded."""
+    from data.price_data import _CACHE, _set_in_cache, _get_from_cache, clear_price_cache, MAX_PRICE_CACHE_ENTRIES
+    clear_price_cache()
+
+    for i in range(MAX_PRICE_CACHE_ENTRIES + 10):
+        _set_in_cache(f"test_key_{i}", f"test_val_{i}")
+
+    # Cache should never exceed MAX_PRICE_CACHE_ENTRIES
+    assert len(_CACHE) <= MAX_PRICE_CACHE_ENTRIES
+    clear_price_cache()

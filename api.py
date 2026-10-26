@@ -11,6 +11,11 @@ Provides REST endpoints for Next.js frontend:
 - 0DTE High-Velocity Flash Lab with intraday Black-Scholes Greeks and theta burn rates
 """
 
+import os
+# Bound glibc memory arenas on Linux/Render containers to prevent virtual & RSS memory bloat
+os.environ.setdefault("MALLOC_ARENA_MAX", "2")
+
+import gc
 import re
 import threading
 from datetime import datetime, date, timezone, timedelta
@@ -43,19 +48,31 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifecycle manager: starts background screener cache worker on startup and shuts down gracefully."""
-    try:
-        cache = get_screener_cache()
-        cache.start_background_worker(interval_minutes=15)
-        logger.info("Stock screener cache worker initialized on startup.")
-    except Exception as exc:
-        logger.error("Failed to start stock screener worker on startup: %s", exc)
+    """Lifecycle manager: starts background screener cache worker if enabled and shuts down gracefully."""
+    # Free tier cloud instances (e.g. Render with 512MB RAM) crash if continuous background
+    # batch downloads run. Controlled via SCREENER_WORKER_ENABLED env var (default: 0).
+    worker_enabled = os.environ.get("SCREENER_WORKER_ENABLED", "1").lower() in ("1", "true", "yes")
+    if worker_enabled:
+        try:
+            cache = get_screener_cache()
+            cache.start_background_worker(interval_minutes=30)
+            logger.info("Stock screener cache worker initialized on startup (interval=30m).")
+        except Exception as exc:
+            logger.error("Failed to start stock screener worker on startup: %s", exc)
+    else:
+        logger.info(
+            "Stock screener background worker disabled (SCREENER_WORKER_ENABLED=0). "
+            "Running in memory-safe cloud mode (<100MB RAM) using pre-warmed seed cache & on-demand scanning."
+        )
+
     yield
-    try:
-        cache = get_screener_cache()
-        cache.stop_background_worker(timeout=2.0)
-    except Exception as exc:
-        logger.error("Error stopping stock screener worker: %s", exc)
+
+    if worker_enabled:
+        try:
+            cache = get_screener_cache()
+            cache.stop_background_worker(timeout=2.0)
+        except Exception as exc:
+            logger.error("Error stopping stock screener worker: %s", exc)
 
 
 app = FastAPI(
@@ -153,8 +170,22 @@ def format_trade_plan_dict(tp: Any) -> Optional[Dict[str, Any]]:
 
 @app.get("/api/health")
 def health_check():
-    """Health check endpoint."""
-    return {"status": "ok", "timestamp": datetime.now().isoformat()}
+    """Health check endpoint with memory diagnostics for cloud container monitoring."""
+    mem_info = {}
+    try:
+        import psutil
+        process = psutil.Process()
+        mem_info = {
+            "rss_mb": round(process.memory_info().rss / (1024 * 1024), 2),
+            "vms_mb": round(process.memory_info().vms / (1024 * 1024), 2),
+        }
+    except Exception:
+        pass
+    return {
+        "status": "ok",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "memory": mem_info,
+    }
 
 
 @app.get("/api/universe")

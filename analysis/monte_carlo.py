@@ -76,8 +76,8 @@ def run_monte_carlo_simulation(
         MonteCarloResult with fan chart trajectories, probabilities, and VaR.
     """
     price = max(0.01, float(current_price))
-    sim_count = max(100, min(10000, int(simulations)))
-    n_days = max(5, min(252, int(forecast_days)))
+    sim_count = max(100, min(5000, int(simulations)))
+    n_days = max(5, min(120, int(forecast_days)))
 
     # Estimate daily drift and volatility from historical close prices
     daily_drift = 0.0004  # default approx ~10% annual drift

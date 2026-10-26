@@ -9,9 +9,26 @@ import yfinance as yf
 
 logger = logging.getLogger(__name__)
 
-# In-memory cache for full option chain matrices: {cache_key: (timestamp, data)}
+# Bounded in-memory cache for full option chain matrices: {cache_key: (timestamp, data)}
 _MATRIX_CACHE: Dict[str, Tuple[float, Any]] = {}
 MATRIX_CACHE_TTL = 300.0  # 5 minutes TTL
+MAX_MATRIX_CACHE_ENTRIES = 25
+
+
+def _prune_expired_matrix_cache() -> None:
+    """Evict expired options matrices to prevent memory buildup on cloud containers."""
+    now = time.time()
+    expired = [k for k, (ts, _) in _MATRIX_CACHE.items() if (now - ts) > MATRIX_CACHE_TTL]
+    for k in expired:
+        _MATRIX_CACHE.pop(k, None)
+
+
+def _store_in_matrix_cache(key: str, data: Any) -> None:
+    _prune_expired_matrix_cache()
+    if len(_MATRIX_CACHE) >= MAX_MATRIX_CACHE_ENTRIES:
+        oldest = min(_MATRIX_CACHE.keys(), key=lambda k: _MATRIX_CACHE[k][0])
+        _MATRIX_CACHE.pop(oldest, None)
+    _MATRIX_CACHE[key] = (time.time(), data)
 
 
 def get_available_expirations(symbol: str) -> List[str]:
@@ -244,7 +261,7 @@ def get_options_chain_matrix(
             "strikes": strikes_matrix,
         }
 
-        _MATRIX_CACHE[cache_key] = (time.time(), result)
+        _store_in_matrix_cache(cache_key, result)
         return result
     except Exception as exc:
         logger.error("Error building options chain matrix for %s (%s): %s", symbol, target_exp, exc)
@@ -426,5 +443,5 @@ def get_volatility_cockpit(symbol: str) -> Dict[str, Any]:
         "expected_moves": expected_moves,
     }
 
-    _MATRIX_CACHE[cache_key] = (time.time(), result)
+    _store_in_matrix_cache(cache_key, result)
     return result

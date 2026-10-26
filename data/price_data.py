@@ -32,9 +32,42 @@ class QuoteData:
     sector: Optional[str] = None
 
 
-# Simple in-memory cache for market data: {cache_key: (timestamp, data)}
+# Bounded in-memory cache for market data to prevent memory leaks on cloud instances
 _CACHE: Dict[str, Any] = {}
 CACHE_TTL = DEFAULT_CONFIG.cache_ttl_seconds
+MAX_PRICE_CACHE_ENTRIES = 50
+
+
+def _prune_expired_cache() -> None:
+    """Evict expired entries to keep memory footprint minimal."""
+    now = time.time()
+    expired = [k for k, (ts, _) in _CACHE.items() if (now - ts) > CACHE_TTL]
+    for k in expired:
+        _CACHE.pop(k, None)
+
+
+def _get_from_cache(key: str) -> Optional[Any]:
+    if key in _CACHE:
+        ts, val = _CACHE[key]
+        if time.time() - ts < CACHE_TTL:
+            return val
+        _CACHE.pop(key, None)
+    return None
+
+
+def _set_in_cache(key: str, val: Any) -> None:
+    _prune_expired_cache()
+    if len(_CACHE) >= MAX_PRICE_CACHE_ENTRIES:
+        # Evict oldest entry (FIFO)
+        oldest_key = min(_CACHE.keys(), key=lambda k: _CACHE[k][0])
+        _CACHE.pop(oldest_key, None)
+    _CACHE[key] = (time.time(), val)
+
+
+def clear_price_cache() -> None:
+    """Explicitly clear the market price data cache."""
+    _CACHE.clear()
+
 
 # Default periods for each timeframe interval
 DEFAULT_TIMEFRAME_PERIODS: Dict[str, str] = {
@@ -49,19 +82,6 @@ DEFAULT_TIMEFRAME_PERIODS: Dict[str, str] = {
     "1wk": "1y",
     "1mo": "2y",
 }
-
-
-def _get_from_cache(key: str) -> Optional[Any]:
-    if key in _CACHE:
-        ts, val = _CACHE[key]
-        if time.time() - ts < CACHE_TTL:
-            return val
-        del _CACHE[key]
-    return None
-
-
-def _set_in_cache(key: str, val: Any) -> None:
-    _CACHE[key] = (time.time(), val)
 
 
 def normalize_timeframe(interval: str = "1d", period: Optional[str] = None) -> Tuple[str, str]:
