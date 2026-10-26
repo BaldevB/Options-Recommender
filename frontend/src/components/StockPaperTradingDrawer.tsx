@@ -20,30 +20,14 @@ import {
   RotateCcw,
 } from "lucide-react";
 
-export interface PaperTradePosition {
-  id: string;
-  ticker: string;
-  contract: string;
-  assetType?: "STOCK" | "OPTION" | string;
-  optionType?: "CALL" | "PUT" | "STOCK" | string;
-  strike?: number;
-  expiration?: string;
-  dte?: number;
-  entryPrice: number;
-  contracts: number; // for stocks: number of shares; for options: contracts
-  shares?: number;
-  multiplier?: number;
-  totalCost: number;
-  enteredAt: string;
-  currentPrice: number;
-  status: "OPEN" | "CLOSED";
-  closedAt?: string;
-  exitPrice?: number;
-  realizedPnl?: number;
-  targetProfitPrice?: number;
-  stopLossPrice?: number;
-  notes?: string;
-}
+import {
+  PaperTradePosition,
+  isOptionExpired,
+  settleExpiredPositions,
+  settleSinglePosition,
+} from "../utils/paperSettlement";
+
+export type { PaperTradePosition };
 
 interface StockPaperTradingDrawerProps {
   isOpen: boolean;
@@ -84,7 +68,17 @@ export default function StockPaperTradingDrawer({
       if (savedPositions) {
         const parsed = JSON.parse(savedPositions);
         if (Array.isArray(parsed)) {
-          setPositions(parsed);
+          let curCash = savedBalance ? parseFloat(savedBalance) : DEFAULT_STARTING_CASH;
+          const autoSettle = settleExpiredPositions(parsed, curCash);
+          if (autoSettle.settledCount > 0) {
+            setPositions(autoSettle.updatedPositions);
+            setCashBalance(autoSettle.newCashBalance);
+            localStorage.setItem(STORAGE_KEY_POSITIONS, JSON.stringify(autoSettle.updatedPositions));
+            localStorage.setItem(STORAGE_KEY_BALANCE, autoSettle.newCashBalance.toString());
+            setFeedbackMessage(autoSettle.summaryMessage);
+          } else {
+            setPositions(parsed);
+          }
         }
       }
     } catch (err) {
@@ -132,8 +126,12 @@ export default function StockPaperTradingDrawer({
         const isStock = p.assetType === "STOCK" || p.optionType === "STOCK" || p.multiplier === 1;
         return {
           symbol: p.ticker,
+          ticker: p.ticker,
           contract: p.contract || p.ticker,
           asset_type: isStock ? "STOCK" : "OPTION",
+          expiration: p.expiration,
+          strike: p.strike,
+          option_type: p.optionType,
         };
       });
 
@@ -161,7 +159,14 @@ export default function StockPaperTradingDrawer({
           return p;
         });
 
-        savePositions(updated);
+        const autoSettle = settleExpiredPositions(updated, cashBalance, quotes);
+        if (autoSettle.settledCount > 0) {
+          savePositions(autoSettle.updatedPositions);
+          saveBalance(autoSettle.newCashBalance);
+          setFeedbackMessage(autoSettle.summaryMessage);
+        } else {
+          savePositions(updated);
+        }
         setLastRefreshed(new Date());
       }
     } catch (err) {
@@ -177,6 +182,32 @@ export default function StockPaperTradingDrawer({
       refreshLiveQuotes();
     }
   }, [isOpen, positions, lastRefreshed, refreshLiveQuotes]);
+
+  // Settle all expired positions in drawer
+  const handleSettleAllExpired = () => {
+    const settlement = settleExpiredPositions(positions, cashBalance);
+    if (settlement.settledCount > 0) {
+      savePositions(settlement.updatedPositions);
+      saveBalance(settlement.newCashBalance);
+      setFeedbackMessage(settlement.summaryMessage);
+    } else {
+      setFeedbackMessage("No open positions currently require expiration settlement.");
+      setTimeout(() => setFeedbackMessage(null), 3500);
+    }
+  };
+
+  // Immediate expiration or simulation of a specific position
+  const handleExpirePositionNow = (posId: string) => {
+    const pos = positions.find((p) => p.id === posId);
+    if (!pos) return;
+    const spot = pos.currentPrice || pos.strike || 0;
+    const settlement = settleSinglePosition(posId, positions, cashBalance, spot);
+    if (settlement.settledCount > 0) {
+      savePositions(settlement.updatedPositions);
+      saveBalance(settlement.newCashBalance);
+      setFeedbackMessage(settlement.summaryMessage);
+    }
+  };
 
   // Close Position
   const handleClosePosition = (positionId: string) => {
@@ -456,6 +487,21 @@ export default function StockPaperTradingDrawer({
 
           {/* Positions List */}
           <div className="flex-1 overflow-y-auto p-4 space-y-3">
+            {positions.some((p) => p.status === "OPEN" && p.assetType !== "STOCK" && p.optionType !== "STOCK" && isOptionExpired(p.expiration)) && (
+              <div className="p-3 rounded-xl border border-amber-500/40 bg-amber-950/20 text-xs text-amber-200 flex items-center justify-between gap-3 shadow-md">
+                <div className="flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>One or more options contracts have reached expiration date.</span>
+                </div>
+                <button
+                  onClick={handleSettleAllExpired}
+                  className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs inline-flex items-center gap-1 shadow-sm"
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  Settle Expired
+                </button>
+              </div>
+            )}
             {filteredPositions.length === 0 ? (
               <div className="py-16 text-center text-slate-500">
                 <Wallet className="w-10 h-10 mx-auto text-slate-600 mb-2 opacity-50" />
@@ -503,8 +549,25 @@ export default function StockPaperTradingDrawer({
                           </span>
                         )}
                         {pos.status === "CLOSED" && (
-                          <span className="px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-400">
-                            CLOSED
+                          <>
+                            {pos.settlementType === "EXPIRED_ITM" ? (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                                💎 Expired ITM
+                              </span>
+                            ) : pos.settlementType === "EXPIRED_WORTHLESS" ? (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/30">
+                                💀 Expired Worthless
+                              </span>
+                            ) : (
+                              <span className="px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-400 border border-slate-700">
+                                CLOSED
+                              </span>
+                            )}
+                          </>
+                        )}
+                        {pos.status === "OPEN" && !isStock && isOptionExpired(pos.expiration) && (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                            ⏳ EXPIRED
                           </span>
                         )}
                       </div>
@@ -608,13 +671,36 @@ export default function StockPaperTradingDrawer({
                           )}
                         </div>
 
-                        <button
-                          type="button"
-                          onClick={() => handleClosePosition(pos.id)}
-                          className="px-3 py-1 rounded-lg text-xs font-semibold bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/50 transition-colors"
-                        >
-                          Close Position
-                        </button>
+                        {!isStock && isOptionExpired(pos.expiration) ? (
+                          <button
+                            type="button"
+                            onClick={() => handleExpirePositionNow(pos.id)}
+                            className="px-3 py-1 rounded-lg text-xs font-bold bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 transition-colors inline-flex items-center gap-1 shadow-sm"
+                          >
+                            <Zap className="w-3.5 h-3.5" />
+                            Cash Settle
+                          </button>
+                        ) : (
+                          <div className="flex items-center gap-1.5">
+                            {!isStock && (
+                              <button
+                                type="button"
+                                onClick={() => handleExpirePositionNow(pos.id)}
+                                title="Simulate expiration at current market price"
+                                className="px-2 py-1 rounded-lg text-[11px] font-medium bg-slate-800/60 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-colors"
+                              >
+                                Simulate Expiry
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => handleClosePosition(pos.id)}
+                              className="px-3 py-1 rounded-lg text-xs font-semibold bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/50 transition-colors"
+                            >
+                              Close Position
+                            </button>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

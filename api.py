@@ -11,8 +11,9 @@ Provides REST endpoints for Next.js frontend:
 - 0DTE High-Velocity Flash Lab with intraday Black-Scholes Greeks and theta burn rates
 """
 
+import re
 import threading
-from datetime import datetime, date
+from datetime import datetime, date, timezone, timedelta
 import logging
 from contextlib import asynccontextmanager
 from typing import Optional, List, Dict, Any
@@ -890,86 +891,192 @@ def get_volatility_cockpit_endpoint(ticker: str = "NVDA"):
 
 
 
+def parse_occ_symbol(contract: str) -> Optional[Dict[str, Any]]:
+    """Parse OCC option symbol (e.g. NVDA261016C00230000) into root, expiration, type, and strike."""
+    if not contract or not isinstance(contract, str):
+        return None
+    m = re.match(r"^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$", contract.strip().upper())
+    if not m:
+        return None
+    root, yy, mm, dd, cp, strike_raw = m.groups()
+    return {
+        "ticker": root,
+        "expiration": f"20{yy}-{mm}-{dd}",
+        "option_type": "CALL" if cp == "C" else "PUT",
+        "strike": int(strike_raw) / 1000.0,
+    }
+
+
+def check_is_expired(expiration_str: Optional[str]) -> bool:
+    """Check if an option expiration date has expired in US Eastern Time (4:00 PM ET close)."""
+    if not expiration_str:
+        return False
+    try:
+        exp_d = datetime.strptime(str(expiration_str).strip()[:10], "%Y-%m-%d").date()
+        try:
+            import zoneinfo
+            et_now = datetime.now(zoneinfo.ZoneInfo("America/New_York"))
+        except Exception:
+            et_now = datetime.now(timezone.utc) - timedelta(hours=4)
+
+        if exp_d < et_now.date():
+            return True
+        if exp_d == et_now.date() and et_now.hour >= 16:
+            return True
+        return False
+    except Exception:
+        return False
+
+
 def fetch_paper_quotes(items_to_quote: List[Any]) -> Dict[str, Any]:
-    """Fetch live or recent market quotes for stock tickers and options contracts."""
+    """Fetch live or recent market quotes for stock tickers and options contracts with automatic expiration settlement."""
     if not items_to_quote:
         return {"quotes": {}}
 
-    extracted: List[Dict[str, str]] = []
+    extracted: List[Dict[str, Any]] = []
     for it in items_to_quote:
         if isinstance(it, str):
             sym = it.strip().upper()
             if sym:
-                is_opt = len(sym) > 6 and any(ch.isdigit() for ch in sym)
+                occ_info = parse_occ_symbol(sym)
+                is_opt = occ_info is not None or (len(sym) > 6 and any(ch.isdigit() for ch in sym))
                 extracted.append({
                     "key": sym,
                     "symbol": sym,
                     "asset_type": "OPTION" if is_opt else "STOCK",
+                    "ticker": occ_info["ticker"] if occ_info else sym,
+                    "expiration": occ_info["expiration"] if occ_info else None,
+                    "option_type": occ_info["option_type"] if occ_info else "CALL",
+                    "strike": occ_info["strike"] if occ_info else None,
                 })
         elif isinstance(it, dict):
             sym = (it.get("symbol") or it.get("contract") or it.get("ticker") or "").strip().upper()
             if not sym:
                 continue
+            key = (it.get("contract") or it.get("symbol") or sym).strip().upper()
+            occ_info = parse_occ_symbol(key) or parse_occ_symbol(sym)
             asset_type = (it.get("asset_type") or it.get("type") or "").strip().upper()
             if not asset_type:
-                is_opt = len(sym) > 6 and any(ch.isdigit() for ch in sym)
+                is_opt = occ_info is not None or (len(sym) > 6 and any(ch.isdigit() for ch in sym))
                 asset_type = "OPTION" if is_opt else "STOCK"
-            key = (it.get("contract") or it.get("symbol") or sym).strip().upper()
+
+            ticker = (it.get("ticker") or (occ_info["ticker"] if occ_info else sym)).strip().upper()
+            exp_val = it.get("expiration") or (occ_info["expiration"] if occ_info else None)
+            opt_type = (it.get("optionType") or it.get("option_type") or (occ_info["option_type"] if occ_info else "CALL")).strip().upper()
+            strike_raw = it.get("strike") if it.get("strike") is not None else (occ_info["strike"] if occ_info else None)
+            strike_val = None
+            if strike_raw is not None:
+                try:
+                    strike_val = float(strike_raw)
+                except (ValueError, TypeError):
+                    strike_val = None
+
             extracted.append({
                 "key": key,
                 "symbol": sym,
                 "asset_type": asset_type,
+                "ticker": ticker,
+                "expiration": exp_val,
+                "option_type": opt_type,
+                "strike": strike_val,
             })
 
     if not extracted:
         return {"quotes": {}}
 
     results: Dict[str, Any] = {}
-    all_syms = list(dict.fromkeys([it["symbol"] for it in extracted]))[:50]
+    all_syms_set = []
+    for it in extracted:
+        if it["symbol"]:
+            all_syms_set.append(it["symbol"])
+        if it["ticker"]:
+            all_syms_set.append(it["ticker"])
+    all_syms = list(dict.fromkeys(all_syms_set))[:60]
 
     try:
         import yfinance as yf
         ticks = yf.Tickers(" ".join(all_syms))
+
+        def _get_price(s: str) -> tuple[float, float]:
+            try:
+                t = ticks.tickers.get(s)
+                fast = getattr(t, "fast_info", None) if t else None
+                p = float(getattr(fast, "last_price", 0.0) or 0.0) if fast else 0.0
+                pc = float(getattr(fast, "previous_close", 0.0) or 0.0) if fast else 0.0
+                if p <= 0.0 and t:
+                    hist = t.history(period="2d")
+                    if hist is not None and not hist.empty:
+                        p = float(hist["Close"].iloc[-1])
+                        if len(hist) > 1:
+                            pc = float(hist["Close"].iloc[-2])
+                return (p, pc)
+            except Exception:
+                return (0.0, 0.0)
+
         for item in extracted:
             key = item["key"]
             sym = item["symbol"]
             asset_type = item["asset_type"]
+            ticker = item["ticker"]
+            opt_type = item["option_type"]
+            strike = item["strike"]
+            exp_date_str = item["expiration"]
 
-            px = 0.0
-            prev_close = 0.0
+            is_expired = False
+            if asset_type == "OPTION" and exp_date_str:
+                is_expired = check_is_expired(exp_date_str)
 
-            try:
-                t = ticks.tickers.get(sym)
-                fast = getattr(t, "fast_info", None) if t else None
-                px = float(getattr(fast, "last_price", 0.0) or 0.0) if fast else 0.0
-                prev_close = float(getattr(fast, "previous_close", 0.0) or 0.0) if fast else 0.0
+            underlying_spot = 0.0
+            if asset_type == "OPTION" and ticker:
+                underlying_spot, _ = _get_price(ticker)
 
-                if px <= 0.0 and t:
-                    hist = t.history(period="2d")
-                    if hist is not None and not hist.empty:
-                        px = float(hist["Close"].iloc[-1])
-                        if len(hist) > 1:
-                            prev_close = float(hist["Close"].iloc[-2])
-
-                change = round(px - prev_close, 2) if (px > 0 and prev_close > 0) else 0.0
-                change_pct = round((change / prev_close) * 100.0, 2) if prev_close > 0 else 0.0
-
+            if is_expired:
+                intrinsic = 0.0
+                if strike is not None and underlying_spot > 0:
+                    if opt_type == "CALL":
+                        intrinsic = max(0.0, round(underlying_spot - strike, 2))
+                    else:
+                        intrinsic = max(0.0, round(strike - underlying_spot, 2))
+                settlement_type = "EXPIRED_ITM" if intrinsic > 0.0 else "EXPIRED_WORTHLESS"
                 results[key] = {
                     "symbol": sym,
+                    "contract": key,
+                    "asset_type": "OPTION",
+                    "current_price": intrinsic,
+                    "previous_close": 0.0,
+                    "change": 0.0,
+                    "change_pct": 0.0,
+                    "valid": True,
+                    "is_expired": True,
+                    "settlement_price": intrinsic,
+                    "settlement_type": settlement_type,
+                    "underlying_symbol": ticker,
+                    "underlying_spot": round(underlying_spot, 2) if underlying_spot > 0 else None,
+                    "strike": strike,
+                    "option_type": opt_type,
+                    "expiration": exp_date_str,
+                }
+            else:
+                px, prev_close = _get_price(sym)
+                change = round(px - prev_close, 2) if (px > 0 and prev_close > 0) else 0.0
+                change_pct = round((change / prev_close) * 100.0, 2) if prev_close > 0 else 0.0
+                results[key] = {
+                    "symbol": sym,
+                    "contract": key,
                     "asset_type": asset_type,
                     "current_price": round(px, 2),
                     "previous_close": round(prev_close, 2),
                     "change": change,
                     "change_pct": change_pct,
                     "valid": px > 0,
-                }
-            except Exception:
-                results[key] = {
-                    "symbol": sym,
-                    "asset_type": asset_type,
-                    "current_price": 0.0,
-                    "previous_close": 0.0,
-                    "valid": False,
+                    "is_expired": False,
+                    "settlement_price": None,
+                    "settlement_type": None,
+                    "underlying_symbol": ticker if asset_type == "OPTION" else None,
+                    "underlying_spot": round(underlying_spot, 2) if underlying_spot > 0 else None,
+                    "strike": strike,
+                    "option_type": opt_type if asset_type == "OPTION" else None,
+                    "expiration": exp_date_str,
                 }
         return {"quotes": results}
     except Exception as exc:
@@ -977,10 +1084,12 @@ def fetch_paper_quotes(items_to_quote: List[Any]) -> Dict[str, Any]:
         for item in extracted:
             results[item["key"]] = {
                 "symbol": item["symbol"],
+                "contract": item["key"],
                 "asset_type": item["asset_type"],
                 "current_price": 0.0,
                 "previous_close": 0.0,
                 "valid": False,
+                "is_expired": False,
             }
         return {"quotes": results}
 

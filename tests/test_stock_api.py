@@ -4,7 +4,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from api import app
+from api import app, check_is_expired, parse_occ_symbol
 from analysis.screener_cache import get_screener_cache
 from analysis.stock_suggester import TradeHorizon, StockTradePlan, StockRecommendation
 
@@ -154,10 +154,11 @@ def test_api_paper_quotes_with_stocks():
     mock_tickers = MagicMock()
     mock_tickers.tickers.get.side_effect = get_ticker_mock
 
+    future_contract = "NVDA261218C00230000"  # Expiring Dec 2026 (active)
     payload = {
         "items": [
             {"symbol": "NVDA", "asset_type": "STOCK"},
-            {"contract": "NVDA261016C00230000", "asset_type": "OPTION"},
+            {"contract": future_contract, "asset_type": "OPTION"},
         ]
     }
 
@@ -167,10 +168,62 @@ def test_api_paper_quotes_with_stocks():
         data = resp.json()
         assert "quotes" in data
         assert "NVDA" in data["quotes"]
-        assert "NVDA261016C00230000" in data["quotes"]
+        assert future_contract in data["quotes"]
         assert data["quotes"]["NVDA"]["valid"] is True
         assert data["quotes"]["NVDA"]["current_price"] == 125.50
-        assert data["quotes"]["NVDA261016C00230000"]["current_price"] == 4.50
+        assert data["quotes"][future_contract]["current_price"] == 4.50
+        assert data["quotes"][future_contract]["is_expired"] is False
+
+
+def test_api_paper_quotes_expired_options_settlement():
+    """POST /api/paper-quotes automatically settles expired options as ITM or Worthless."""
+    client = TestClient(app)
+
+    # Underlying NVDA spot is 130.00
+    mock_fast_nvda = MagicMock(last_price=130.00, previous_close=128.00)
+    mock_ticker_nvda = MagicMock(fast_info=mock_fast_nvda)
+
+    mock_tickers = MagicMock()
+    mock_tickers.tickers.get.side_effect = lambda s: mock_ticker_nvda if "NVDA" in s else None
+
+    # Past expiration date: 2024-05-17
+    # 1) Call with strike 100: spot 130 -> intrinsic 30.00 (ITM)
+    # 2) Call with strike 150: spot 130 -> intrinsic 0.00 (Worthless)
+    # 3) Put with strike 140: spot 130 -> intrinsic 10.00 (ITM)
+    itm_call = "NVDA240517C00100000"
+    otm_call = "NVDA240517C00150000"
+    itm_put = "NVDA240517P00140000"
+
+    payload = {
+        "items": [
+            {"contract": itm_call, "asset_type": "OPTION"},
+            {"contract": otm_call, "asset_type": "OPTION"},
+            {"contract": itm_put, "asset_type": "OPTION"},
+        ]
+    }
+
+    with patch("yfinance.Tickers", return_value=mock_tickers):
+        resp = client.post("/api/paper-quotes", json=payload)
+        assert resp.status_code == 200
+        quotes = resp.json()["quotes"]
+
+        # ITM Call check
+        assert quotes[itm_call]["is_expired"] is True
+        assert quotes[itm_call]["settlement_type"] == "EXPIRED_ITM"
+        assert quotes[itm_call]["settlement_price"] == 30.00
+        assert quotes[itm_call]["current_price"] == 30.00
+
+        # OTM Call check
+        assert quotes[otm_call]["is_expired"] is True
+        assert quotes[otm_call]["settlement_type"] == "EXPIRED_WORTHLESS"
+        assert quotes[otm_call]["settlement_price"] == 0.00
+        assert quotes[otm_call]["current_price"] == 0.00
+
+        # ITM Put check
+        assert quotes[itm_put]["is_expired"] is True
+        assert quotes[itm_put]["settlement_type"] == "EXPIRED_ITM"
+        assert quotes[itm_put]["settlement_price"] == 10.00
+        assert quotes[itm_put]["current_price"] == 10.00
 
 
 def test_api_paper_quotes_empty():
