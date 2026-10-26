@@ -87,6 +87,16 @@ def recommendation_to_dict(
             d["ma_alignment"] = str(d.get("ma_structure", "NEUTRAL"))
         if "strategy_tag" not in d:
             d["strategy_tag"] = str(d.get("strategy", "MOMENTUM_SWING"))
+        if "is_stage_2" not in d:
+            d["is_stage_2"] = bool(d.get("is_stage_2", False))
+        if "is_vcp_squeeze" not in d:
+            d["is_vcp_squeeze"] = bool(d.get("is_vcp_squeeze", False))
+        if "consolidation_tightness" not in d:
+            d["consolidation_tightness"] = float(d.get("consolidation_tightness", 50.0))
+        if "accumulation_rating" not in d:
+            d["accumulation_rating"] = str(d.get("accumulation_rating", "B"))
+        if "up_down_volume_ratio" not in d:
+            d["up_down_volume_ratio"] = float(d.get("up_down_volume_ratio", 1.0))
         return d
 
     plan = rec.trade_plan
@@ -122,6 +132,11 @@ def recommendation_to_dict(
     dist_52w = getattr(rec, "distance_from_52w_high_pct", 0.0)
     ma_align = getattr(rec, "ma_alignment", "NEUTRAL")
     strat = getattr(rec, "strategy_tag", "MOMENTUM_SWING")
+    is_stage_2 = getattr(rec, "is_stage_2", False)
+    is_vcp = getattr(rec, "is_vcp_squeeze", False)
+    tightness = getattr(rec, "consolidation_tightness", 50.0)
+    accum_rating = getattr(rec, "accumulation_rating", "B")
+    up_down_ratio = getattr(rec, "up_down_volume_ratio", 1.0)
 
     return {
         "symbol": rec.symbol,
@@ -145,6 +160,11 @@ def recommendation_to_dict(
         "distance_from_52w_high_pct": round(float(dist_52w), 1),
         "ma_alignment": ma_align,
         "strategy_tag": strat,
+        "is_stage_2": bool(is_stage_2),
+        "is_vcp_squeeze": bool(is_vcp),
+        "consolidation_tightness": round(float(tightness), 1),
+        "accumulation_rating": str(accum_rating),
+        "up_down_volume_ratio": round(float(up_down_ratio), 2),
     }
 
 
@@ -174,8 +194,9 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             },
             "rationale": [
                 "Dominant institutional demand and high RS percentile rating (94) vs market benchmark.",
+                "Minervini Stage 2 Confirmed: Full uptrend template with price > 50 DMA > 200 DMA.",
+                "Institutional Flow: A+ Rating (Up/Down Volume Ratio: 1.85x).",
                 "Consolidating inside high-probability breakout zone within 2% of 52-week rolling highs.",
-                "Full bullish moving average alignment (20 EMA > 50 SMA > 200 SMA).",
             ],
             "price": 141.20,
             "change": 3.45,
@@ -186,7 +207,12 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             "relative_strength_score": 94.0,
             "distance_from_52w_high_pct": -1.8,
             "ma_alignment": "FULL_BULLISH",
-            "strategy_tag": "RS_LEADER",
+            "strategy_tag": "STAGE_2_LEADER",
+            "is_stage_2": True,
+            "is_vcp_squeeze": False,
+            "consolidation_tightness": 74.0,
+            "accumulation_rating": "A+",
+            "up_down_volume_ratio": 1.85,
         },
         {
             "symbol": "PLTR",
@@ -211,8 +237,9 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             },
             "rationale": [
                 "Top 1% market leader with Relative Strength of 97 and high volume accumulation.",
-                "Breaking out above historical resistance on 1.7x volume expansion.",
-                "Full bullish moving average structure with rising 20 EMA.",
+                "Minervini Stage 2 Confirmed: Full uptrend template with price > 50 DMA > 200 DMA.",
+                "VCP Squeeze Active: Volatility compression tightness score of 88/100.",
+                "Institutional Flow: A+ Rating (Up/Down Volume Ratio: 2.10x).",
             ],
             "price": 43.75,
             "change": 1.85,
@@ -223,7 +250,12 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             "relative_strength_score": 97.0,
             "distance_from_52w_high_pct": -0.6,
             "ma_alignment": "FULL_BULLISH",
-            "strategy_tag": "52W_BREAKOUT",
+            "strategy_tag": "STAGE_2_LEADER",
+            "is_stage_2": True,
+            "is_vcp_squeeze": True,
+            "consolidation_tightness": 88.0,
+            "accumulation_rating": "A+",
+            "up_down_volume_ratio": 2.10,
         },
         {
             "symbol": "TSLA",
@@ -248,8 +280,8 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             },
             "rationale": [
                 "Strong relative strength vs broader market with sharp upward momentum surge.",
-                "Volume confirmation above 20-day moving average.",
-                "Bullish trend continuation pattern holding key moving averages.",
+                "Minervini Stage 2 Confirmed: Price > 50 DMA > 200 DMA.",
+                "Institutional Flow: A+ Rating (Up/Down Volume Ratio: 1.65x).",
             ],
             "price": 260.50,
             "change": 7.30,
@@ -260,7 +292,12 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             "relative_strength_score": 91.0,
             "distance_from_52w_high_pct": -2.4,
             "ma_alignment": "FULL_BULLISH",
-            "strategy_tag": "RS_LEADER",
+            "strategy_tag": "STAGE_2_LEADER",
+            "is_stage_2": True,
+            "is_vcp_squeeze": False,
+            "consolidation_tightness": 68.0,
+            "accumulation_rating": "A+",
+            "up_down_volume_ratio": 1.65,
         },
         {
             "symbol": "META",
@@ -285,8 +322,8 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             },
             "rationale": [
                 "Testing all-time rolling highs with steady accumulation from institutional funds.",
-                "Consolidation base breakout with RSI at healthy bullish level.",
-                "Full bullish trend stacking across 20, 50, and 200 daily moving averages.",
+                "VCP Squeeze Active: Volatility compression tightness score of 84/100.",
+                "Institutional Flow: A+ Rating (Up/Down Volume Ratio: 1.58x).",
             ],
             "price": 582.00,
             "change": 8.50,
@@ -297,7 +334,12 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             "relative_strength_score": 92.0,
             "distance_from_52w_high_pct": -1.2,
             "ma_alignment": "FULL_BULLISH",
-            "strategy_tag": "52W_BREAKOUT",
+            "strategy_tag": "INSTITUTIONAL_INFLOW",
+            "is_stage_2": True,
+            "is_vcp_squeeze": True,
+            "consolidation_tightness": 84.0,
+            "accumulation_rating": "A+",
+            "up_down_volume_ratio": 1.58,
         },
         {
             "symbol": "AAPL",
@@ -321,9 +363,9 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
                 "tp2_pct": 17.6,
             },
             "rationale": [
-                "Steady uptrend channel supported by 50-day moving average.",
+                "VCP Squeeze Active: Tight volatility contraction holding the 50-day moving average.",
                 "Healthy risk-reward ratio of 1.95:1 with manageable downside invalidation.",
-                "Favorable longer-term product cycle catalyst.",
+                "Institutional Flow: A Rating (Up/Down Volume Ratio: 1.35x).",
             ],
             "price": 229.50,
             "change": 1.80,
@@ -334,7 +376,12 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             "relative_strength_score": 82.0,
             "distance_from_52w_high_pct": -2.8,
             "ma_alignment": "BULLISH_TREND",
-            "strategy_tag": "MOMENTUM_SWING",
+            "strategy_tag": "VCP_SQUEEZE",
+            "is_stage_2": True,
+            "is_vcp_squeeze": True,
+            "consolidation_tightness": 82.0,
+            "accumulation_rating": "A",
+            "up_down_volume_ratio": 1.35,
         },
         {
             "symbol": "MSFT",
@@ -359,8 +406,8 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             },
             "rationale": [
                 "Golden Cross formation with 50 SMA crossing above 200 SMA.",
-                "Institutional accumulation at key support zone.",
-                "Cloud & enterprise AI growth driving earnings resilience.",
+                "Minervini Stage 2 Confirmed: Price > 50 DMA > 200 DMA.",
+                "Institutional accumulation at key support zone (A Rating).",
             ],
             "price": 426.00,
             "change": 2.40,
@@ -372,6 +419,11 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             "distance_from_52w_high_pct": -3.5,
             "ma_alignment": "GOLDEN_CROSS",
             "strategy_tag": "GOLDEN_CROSS",
+            "is_stage_2": True,
+            "is_vcp_squeeze": False,
+            "consolidation_tightness": 62.0,
+            "accumulation_rating": "A",
+            "up_down_volume_ratio": 1.28,
         },
         {
             "symbol": "AMZN",
@@ -395,9 +447,9 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
                 "tp2_pct": 19.4,
             },
             "rationale": [
+                "Institutional Flow: A+ Rating (Up/Down Volume Ratio: 1.62x).",
                 "Approaching 52-week rolling high with accelerating cloud margin expansion.",
-                "Golden Cross structure supported by rising 50 DMA.",
-                "RSI confirms momentum without entering overbought territory.",
+                "VCP Squeeze Active: Tight volatility compression.",
             ],
             "price": 188.50,
             "change": 3.10,
@@ -408,7 +460,12 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             "relative_strength_score": 88.0,
             "distance_from_52w_high_pct": -2.5,
             "ma_alignment": "GOLDEN_CROSS",
-            "strategy_tag": "GOLDEN_CROSS",
+            "strategy_tag": "INSTITUTIONAL_INFLOW",
+            "is_stage_2": True,
+            "is_vcp_squeeze": True,
+            "consolidation_tightness": 85.0,
+            "accumulation_rating": "A+",
+            "up_down_volume_ratio": 1.62,
         },
         {
             "symbol": "CCJ",
@@ -433,8 +490,8 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             },
             "rationale": [
                 "Nuclear energy & uranium secular multi-year structural supply deficit.",
-                "52-week high breakout with institutional volume expansion.",
-                "Full bullish trend alignment across all key EMAs.",
+                "Minervini Stage 2 Confirmed: Price > 50 DMA > 200 DMA.",
+                "Institutional Flow: A+ Rating (Up/Down Volume Ratio: 1.75x).",
             ],
             "price": 53.80,
             "change": 1.95,
@@ -446,6 +503,11 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             "distance_from_52w_high_pct": -1.9,
             "ma_alignment": "FULL_BULLISH",
             "strategy_tag": "52W_BREAKOUT",
+            "is_stage_2": True,
+            "is_vcp_squeeze": False,
+            "consolidation_tightness": 70.0,
+            "accumulation_rating": "A+",
+            "up_down_volume_ratio": 1.75,
         },
         {
             "symbol": "FCX",
@@ -471,7 +533,7 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             "rationale": [
                 "Pullback dip buy opportunity holding key support near the 50-day moving average.",
                 "Copper demand fundamentals supported by AI data centers and electrification.",
-                "Favorable 1.84:1 risk-reward profile on technical bounce.",
+                "Balanced volume accumulation (B Rating).",
             ],
             "price": 45.20,
             "change": 0.85,
@@ -483,6 +545,11 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             "distance_from_52w_high_pct": -8.5,
             "ma_alignment": "ABOVE_50DMA",
             "strategy_tag": "PULLBACK_DIP",
+            "is_stage_2": False,
+            "is_vcp_squeeze": False,
+            "consolidation_tightness": 54.0,
+            "accumulation_rating": "B",
+            "up_down_volume_ratio": 1.08,
         },
         {
             "symbol": "AMD",
@@ -507,7 +574,7 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             },
             "rationale": [
                 "Pullback into strong horizontal support cluster with oversold RSI bounce.",
-                "Data center GPU market share expansion provides strong catalyst.",
+                "VCP Squeeze Active: Volatility compression tightness score of 78/100.",
                 "Defined stop loss beneath the 200-day moving average zone.",
             ],
             "price": 152.00,
@@ -520,6 +587,11 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             "distance_from_52w_high_pct": -14.2,
             "ma_alignment": "ABOVE_50DMA",
             "strategy_tag": "PULLBACK_DIP",
+            "is_stage_2": False,
+            "is_vcp_squeeze": True,
+            "consolidation_tightness": 78.0,
+            "accumulation_rating": "B",
+            "up_down_volume_ratio": 0.98,
         },
         {
             "symbol": "JPM",
@@ -544,8 +616,8 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             },
             "rationale": [
                 "Best-in-class financial franchise breaking out to new rolling highs.",
-                "Net interest income resilience and strong investment banking fees.",
-                "Consistent relative strength outperforming the S&P 500 index.",
+                "Minervini Stage 2 Confirmed: Price > 50 DMA > 200 DMA.",
+                "Institutional Flow: A Rating (Up/Down Volume Ratio: 1.32x).",
             ],
             "price": 222.00,
             "change": 2.10,
@@ -557,6 +629,11 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             "distance_from_52w_high_pct": -1.5,
             "ma_alignment": "FULL_BULLISH",
             "strategy_tag": "52W_BREAKOUT",
+            "is_stage_2": True,
+            "is_vcp_squeeze": False,
+            "consolidation_tightness": 65.0,
+            "accumulation_rating": "A",
+            "up_down_volume_ratio": 1.32,
         },
         {
             "symbol": "LLY",
@@ -581,8 +658,9 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             },
             "rationale": [
                 "Healthcare sector market leader with RS rating of 90 and explosive GLP-1 revenue.",
-                "Bullish moving average alignment holding above 20 and 50 EMAs.",
-                "Superior margins and accelerating multi-year earnings revisions.",
+                "Minervini Stage 2 Confirmed: Price > 50 DMA > 200 DMA.",
+                "VCP Squeeze Active: Volatility compression tightness score of 87/100.",
+                "Institutional Flow: A+ Rating (Up/Down Volume Ratio: 1.92x).",
             ],
             "price": 905.00,
             "change": 12.40,
@@ -593,7 +671,12 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             "relative_strength_score": 90.0,
             "distance_from_52w_high_pct": -2.2,
             "ma_alignment": "FULL_BULLISH",
-            "strategy_tag": "RS_LEADER",
+            "strategy_tag": "STAGE_2_LEADER",
+            "is_stage_2": True,
+            "is_vcp_squeeze": True,
+            "consolidation_tightness": 87.0,
+            "accumulation_rating": "A+",
+            "up_down_volume_ratio": 1.92,
         },
         {
             "symbol": "COST",
@@ -618,8 +701,8 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             },
             "rationale": [
                 "Exceptional customer renewal rates and steady compound growth.",
-                "Testing all-time highs on steady volume accumulation.",
-                "Defensive high-growth consumer staple holding key EMAs.",
+                "Minervini Stage 2 Confirmed: Price > 50 DMA > 200 DMA.",
+                "VCP Squeeze Active: Volatility compression tightness score of 83/100.",
             ],
             "price": 912.00,
             "change": 8.00,
@@ -631,6 +714,11 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             "distance_from_52w_high_pct": -1.3,
             "ma_alignment": "FULL_BULLISH",
             "strategy_tag": "52W_BREAKOUT",
+            "is_stage_2": True,
+            "is_vcp_squeeze": True,
+            "consolidation_tightness": 83.0,
+            "accumulation_rating": "A",
+            "up_down_volume_ratio": 1.40,
         },
         {
             "symbol": "CRWD",
@@ -655,8 +743,9 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             },
             "rationale": [
                 "Completed major bottoming base and reclaiming the 200-day moving average.",
-                "Golden Cross structural signal with 20 EMA crossing above 50 SMA.",
-                "Enterprise cybersecurity spending remains a top non-discretionary priority.",
+                "Minervini Stage 2 Confirmed: Price > 50 DMA > 200 DMA.",
+                "VCP Squeeze Active: Tight volatility contraction (81/100).",
+                "Institutional Flow: A+ Rating (Up/Down Volume Ratio: 1.55x).",
             ],
             "price": 322.00,
             "change": 5.60,
@@ -667,7 +756,12 @@ def _get_default_seed_stocks() -> List[Dict[str, Any]]:
             "relative_strength_score": 84.0,
             "distance_from_52w_high_pct": -5.1,
             "ma_alignment": "GOLDEN_CROSS",
-            "strategy_tag": "GOLDEN_CROSS",
+            "strategy_tag": "VCP_SQUEEZE",
+            "is_stage_2": True,
+            "is_vcp_squeeze": True,
+            "consolidation_tightness": 81.0,
+            "accumulation_rating": "A+",
+            "up_down_volume_ratio": 1.55,
         },
     ]
 
@@ -763,9 +857,9 @@ class StockScreenerCache:
         Args:
             horizon: Filter by timeframe horizon ('ALL', 'SWING', 'LONG_TERM', 'BREAKOUT').
             sector: Filter by sector slug or human-readable name.
-            strategy: Preset strategy filter ('rs_leaders', 'breakouts', 'golden_cross', 'pullback').
+            strategy: Preset strategy filter ('stage_2', 'vcp_squeeze', 'accumulation', 'rs_leaders', 'breakouts', 'golden_cross', 'pullback').
             search: Ticker symbol or company name search substring.
-            sort_by: Sorting field ('score', 'symbol', 'price', 'change_pct', 'volume_ratio', 'rsi', etc.).
+            sort_by: Sorting field ('score', 'symbol', 'price', 'change_pct', 'volume_ratio', 'rsi', 'stage_2', 'accumulation', 'vcp', etc.).
             limit: Page size limit (default 50).
             offset: Page offset (default 0).
 
@@ -827,15 +921,29 @@ class StockScreenerCache:
                 d52 = item.get("distance_from_52w_high_pct", -50.0)
                 ma = item.get("ma_alignment", "").upper()
                 rsi_val = item.get("rsi", 50.0)
+                is_s2 = bool(item.get("is_stage_2", False))
+                is_vcp = bool(item.get("is_vcp_squeeze", False))
+                tightness_val = float(item.get("consolidation_tightness", 50.0))
+                ad_rating = str(item.get("accumulation_rating", "B")).upper()
+                ud_ratio = float(item.get("up_down_volume_ratio", 1.0))
 
-                if strat_norm in ("rs_leaders", "rs", "relative_strength"):
-                    if not (tag == "rs_leader" or rs >= 75.0):
+                if strat_norm in ("stage_2", "stage2", "stage_2_leaders", "minervini"):
+                    if not (is_s2 or tag == "stage_2_leader"):
+                        continue
+                elif strat_norm in ("vcp", "vcp_squeeze", "squeeze", "tightness"):
+                    if not (is_vcp or tag == "vcp_squeeze" or tightness_val >= 65.0):
+                        continue
+                elif strat_norm in ("accumulation", "institutional_inflow", "inflow", "institutional"):
+                    if not (ad_rating in ("A+", "A") or tag == "institutional_inflow" or ud_ratio >= 1.25):
+                        continue
+                elif strat_norm in ("rs_leaders", "rs", "relative_strength"):
+                    if not (tag in ("rs_leader", "stage_2_leader") or rs >= 75.0):
                         continue
                 elif strat_norm in ("breakouts", "52w_breakouts", "breakout"):
                     if not (tag == "52w_breakout" or d52 >= -7.0):
                         continue
                 elif strat_norm in ("golden_cross", "golden"):
-                    if not (tag == "golden_cross" or "GOLDEN" in ma or "BULLISH" in ma):
+                    if not (tag == "golden_cross" or "GOLDEN" in ma or "FULL_BULLISH" in ma or "BULLISH" in ma):
                         continue
                 elif strat_norm in ("pullback", "pullback_dips", "dip_buy", "dips"):
                     if not (tag == "pullback_dip" or rsi_val <= 45.0):
@@ -874,6 +982,12 @@ class StockScreenerCache:
             filtered.sort(key=lambda x: x.get("relative_strength_score", 50.0), reverse=True)
         elif sort_field in ("dist_52w", "distance_52w", "52w_high"):
             filtered.sort(key=lambda x: x.get("distance_from_52w_high_pct", -100.0), reverse=True)
+        elif sort_field in ("stage_2", "stage2", "minervini"):
+            filtered.sort(key=lambda x: (1 if x.get("is_stage_2") else 0, x.get("score", 0.0)), reverse=True)
+        elif sort_field in ("accumulation", "inflow", "ad_ratio", "up_down_volume_ratio", "up_down_ratio"):
+            filtered.sort(key=lambda x: x.get("up_down_volume_ratio", 1.0), reverse=True)
+        elif sort_field in ("vcp", "vcp_squeeze", "tightness", "squeeze", "consolidation_tightness"):
+            filtered.sort(key=lambda x: x.get("consolidation_tightness", 50.0), reverse=True)
         else:
             filtered.sort(key=lambda x: x.get("score", 0.0), reverse=True)
 
@@ -1012,6 +1126,7 @@ class StockScreenerCache:
                             "day_high": float(df_sym["High"].iloc[-1]),
                             "day_low": float(df_sym["Low"].iloc[-1]),
                             "fifty_two_week_high": float(df_sym["High"].max()),
+                            "fifty_two_week_low": float(df_sym["Low"].min()),
                             "volume": int(df_sym["Volume"].iloc[-1]),
                             "valid": True,
                         }

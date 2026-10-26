@@ -218,114 +218,98 @@ function StockRecommendationsContent() {
 
       const res = await fetch(`/api/stocks/recommendations?${params.toString()}`);
       if (!res.ok) {
-        throw new Error(`Server returned ${res.status}: ${res.statusText}`);
+        throw new Error(`Server returned HTTP ${res.status}`);
       }
-
-      const json = await res.json();
-      if (json && Array.isArray(json.items)) {
-        setRecommendations(json.items);
+      const data = await res.json();
+      if (data && Array.isArray(data.items)) {
+        setRecommendations(data.items);
       } else {
         setRecommendations([]);
       }
     } catch (err: any) {
       console.error("Error fetching stock recommendations:", err);
-      setError(err.message || "Failed to load stock recommendations.");
+      setError(err.message || "Failed to load stock recommendations");
     } finally {
       setLoading(false);
-      fetchStatus();
-    }
-  }, [activeHorizon, activeStrategy, selectedSector, searchQuery, sortBy, fetchStatus]);
-
-  useEffect(() => {
-    fetchRecommendations();
-  }, [fetchRecommendations]);
-
-  // Auto-poll if screener is actively refreshing or if no recommendations yet
-  useEffect(() => {
-    let interval: NodeJS.Timeout | null = null;
-    if (cacheStatus?.is_refreshing || recommendations.length === 0) {
-      interval = setInterval(() => {
-        fetchRecommendations();
-      }, 3000);
-    }
-    return () => {
-      if (interval) clearInterval(interval);
-    };
-  }, [cacheStatus?.is_refreshing, recommendations.length, fetchRecommendations]);
-
-  // Trigger Force Refresh
-  const handleForceRefresh = async () => {
-    setRefreshing(true);
-    try {
-      const res = await fetch("/api/stocks/refresh", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ force: true }),
-      });
-      if (res.ok) {
-        showToast("Screener scan started in background. Recommendations will update automatically!");
-        await fetchRecommendations();
-      } else {
-        showToast("Refresh queued or already in progress.");
-      }
-    } catch (err) {
-      console.error("Refresh error:", err);
-      showToast("Error triggering refresh.");
-    } finally {
       setRefreshing(false);
     }
+  }, [activeHorizon, activeStrategy, selectedSector, searchQuery, sortBy]);
+
+  // Initial and reactive fetch
+  useEffect(() => {
+    fetchRecommendations();
+    fetchStatus();
+  }, [fetchRecommendations, fetchStatus]);
+
+  // Periodic poll of status to monitor background universe scanner
+  useEffect(() => {
+    const timer = setInterval(() => {
+      fetchStatus();
+    }, 15000);
+    return () => clearInterval(timer);
+  }, [fetchStatus]);
+
+  // Manual Trigger Refresh
+  const handleManualRefresh = async () => {
+    setRefreshing(true);
+    await fetchRecommendations();
+    await fetchStatus();
   };
 
-  // Deep Dive fetch
-  const openDeepDive = useCallback(async (stock: StockRecommendationItem) => {
-    setDeepDiveStock(stock);
-    setDeepDiveLoading(true);
-    setDeepDiveAnalysis(null);
-    setDeepDiveCandles([]);
+  // Open Deep Dive Modal for a stock
+  const openDeepDive = useCallback(
+    async (stk: StockRecommendationItem) => {
+      setDeepDiveStock(stk);
+      setDeepDiveLoading(true);
+      setDeepDiveAnalysis(null);
+      setDeepDiveCandles([]);
 
-    try {
-      // 1. Fetch analysis
-      const analysisPromise = fetch(`/api/stocks/analysis?symbol=${encodeURIComponent(stock.symbol)}`)
-        .then((r) => (r.ok ? r.json() : null))
-        .catch(() => null);
+      try {
+        // Fetch OHLCV candles for TradingView chart
+        const candleRes = await fetch(
+          `/api/candles?ticker=${encodeURIComponent(stk.symbol)}&timeframe=daily`
+        );
+        if (candleRes.ok) {
+          const cData = await candleRes.json();
+          if (cData && Array.isArray(cData.candles)) {
+            setDeepDiveCandles(cData.candles);
+          }
+        }
 
-      // 2. Fetch candles for TradingView chart
-      const candlesPromise = fetch(
-        `/api/candles?ticker=${encodeURIComponent(stock.symbol)}&interval=1d&period=6mo`
-      )
-        .then((r) => (r.ok ? r.json() : null))
-        .catch(() => null);
-
-      const [analysisRes, candlesRes] = await Promise.all([analysisPromise, candlesPromise]);
-
-      if (analysisRes) setDeepDiveAnalysis(analysisRes);
-      if (candlesRes && Array.isArray(candlesRes.candles)) {
-        setDeepDiveCandles(candlesRes.candles);
+        // Fetch deep dive analysis if needed
+        const deepRes = await fetch(
+          `/api/stocks/analysis?symbol=${encodeURIComponent(stk.symbol)}`
+        );
+        if (deepRes.ok) {
+          const aData = await deepRes.json();
+          setDeepDiveAnalysis(aData);
+        }
+      } catch (err) {
+        console.error("Error loading deep dive modal data:", err);
+      } finally {
+        setDeepDiveLoading(false);
       }
-    } catch (err) {
-      console.error("Error fetching deep dive:", err);
-    } finally {
-      setDeepDiveLoading(false);
-    }
-  }, []);
+    },
+    []
+  );
 
-  // Handle URL ?symbol= query parameter
+  // Auto-open deep-dive if ticker passed via query param
   useEffect(() => {
     if (initialSymbol && recommendations.length > 0 && !deepDiveStock) {
-      const matched = recommendations.find(
-        (r) => r.symbol.toUpperCase() === initialSymbol.trim().toUpperCase()
+      const match = recommendations.find(
+        (r) => r.symbol.toUpperCase() === initialSymbol.toUpperCase()
       );
-      if (matched) {
-        openDeepDive(matched);
+      if (match) {
+        openDeepDive(match);
       } else {
-        // Fetch on-demand analysis
+        // If not in current page, load on-demand deep dive
         openDeepDive({
           symbol: initialSymbol.toUpperCase(),
-          name: `${initialSymbol.toUpperCase()} Equity`,
-          sector: "Selected",
+          name: initialSymbol.toUpperCase(),
+          sector: "Equities",
           horizon: "SWING",
-          action: "BUY",
-          score: 80,
+          action: "BUY ACCUMULATE",
+          score: 80.0,
           confidence: 0.8,
           momentum_score: 0.5,
           sentiment_score: 0.2,
@@ -337,16 +321,16 @@ function StockRecommendationsContent() {
             stop_loss: 0,
             risk_reward_ratio: 2.0,
             invalidation_pct: 5.0,
-            tp1_pct: 15.0,
-            tp2_pct: 30.0,
+            tp1_pct: 10.0,
+            tp2_pct: 18.0,
           },
-          rationale: [],
+          rationale: ["On-demand ticker deep dive requested."],
           price: 0,
           change: 0,
           change_pct: 0,
           volume_ratio: 1.0,
-          rsi: 50,
-          target_pct: 15.0,
+          rsi: 50.0,
+          target_pct: 10.0,
         });
       }
     }
@@ -374,15 +358,17 @@ function StockRecommendationsContent() {
   // Top statistics
   const stats = useMemo(() => {
     const total = recommendations.length;
-    if (total === 0) return { total: 0, avgScore: "0.0", strongBuys: 0, avgGain: "0.0" };
+    if (total === 0) return { total: 0, avgScore: "0.0", strongBuys: 0, avgGain: "0.0", stage2Count: 0 };
     const avgScore = recommendations.reduce((acc, r) => acc + (r.score || 0), 0) / total;
     const strongBuys = recommendations.filter((r) => (r.action || "").includes("STRONG")).length;
     const avgGain = recommendations.reduce((acc, r) => acc + (r.trade_plan?.tp1_pct || 0), 0) / total;
+    const stage2Count = recommendations.filter((r) => r.is_stage_2).length;
     return {
       total,
       avgScore: avgScore.toFixed(1),
       strongBuys,
       avgGain: avgGain.toFixed(1),
+      stage2Count,
     };
   }, [recommendations]);
 
@@ -448,41 +434,45 @@ function StockRecommendationsContent() {
               className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-900 hover:bg-slate-800 border border-slate-700/80 hover:border-cyan-500/40 text-slate-200 transition-all shadow-sm"
               title="Open Paper Portfolio"
             >
-              <Wallet className="w-4 h-4 text-cyan-400" />
+              <Wallet className="w-4 h-4 text-emerald-400" />
               <span className="hidden sm:inline">Paper Portfolio</span>
+              <span className="font-mono font-bold text-emerald-300">
+                ${paperBalance.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+              </span>
               {paperPositionsCount > 0 && (
-                <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">
+                <span className="ml-1 px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-bold">
                   {paperPositionsCount}
                 </span>
               )}
             </button>
 
-            {/* Refresh Screener */}
+            {/* Refresh Button */}
             <button
               type="button"
-              onClick={handleForceRefresh}
+              onClick={handleManualRefresh}
               disabled={refreshing}
-              className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-slate-300 hover:text-cyan-300 transition-colors"
-              title="Refresh Screener Cache"
+              className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700/80 hover:border-cyan-500/40 text-slate-300 hover:text-cyan-300 transition-colors"
+              title="Refresh recommendations"
             >
-              <RefreshCw className={`w-4 h-4 ${refreshing || cacheStatus?.is_refreshing ? "animate-spin text-cyan-400" : ""}`} />
+              <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin text-cyan-400" : ""}`} />
             </button>
           </div>
         </div>
       </header>
 
-      {/* Main Container */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 space-y-6">
-        {/* Horizon Tabs, Strategy Presets & Filter Toolbar */}
-        <div className="flex flex-col gap-3.5 bg-[#0a101f] border border-slate-800/80 rounded-2xl p-4 shadow-xl">
-          {/* Horizon Tabs */}
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/70 pb-3">
-            <div className="flex flex-wrap items-center gap-1 sm:gap-2">
+      {/* Main Body Container */}
+      <main className="max-w-7xl mx-auto w-full px-4 sm:px-6 py-6 flex-1 space-y-6">
+        {/* Controls Container */}
+        <div className="space-y-4 rounded-2xl border border-slate-800 bg-[#0b1220]/80 p-4 sm:p-5 backdrop-blur-md shadow-xl">
+          {/* Horizon & View Switcher Row */}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            {/* Horizon Filter Tabs */}
+            <div className="flex flex-wrap items-center gap-1.5 p-1 rounded-xl bg-slate-900 border border-slate-800">
               {[
-                { id: "ALL", label: "All Horizons", icon: Compass },
-                { id: "SWING", label: "⚡ Swing Momentum (2-6w)", icon: Zap },
-                { id: "LONG_TERM", label: "💎 Long-Term Conviction (3-12m)", icon: Sparkles },
-                { id: "BREAKOUT", label: "🚀 Breakout Volume (>1.2x)", icon: Flame },
+                { id: "ALL", label: "All Horizons", icon: Layers },
+                { id: "SWING", label: "⚡ Swing (2-6w)", icon: Zap },
+                { id: "LONG_TERM", label: "💎 Long-Term (3-12m)", icon: ShieldCheck },
+                { id: "BREAKOUT", label: "🚀 Breakouts", icon: Flame },
               ].map((tab) => {
                 const Icon = tab.icon;
                 const isActive = activeHorizon === tab.id;
@@ -491,10 +481,10 @@ function StockRecommendationsContent() {
                     key={tab.id}
                     type="button"
                     onClick={() => setActiveHorizon(tab.id)}
-                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all ${
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
                       isActive
-                        ? "bg-gradient-to-r from-cyan-500/20 to-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-[0_0_15px_rgba(16,185,129,0.2)] font-bold"
-                        : "bg-slate-900/60 text-slate-400 hover:text-slate-200 hover:bg-slate-800 border border-slate-800"
+                        ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-[0_0_12px_rgba(16,185,129,0.25)] font-bold"
+                        : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/60"
                     }`}
                   >
                     <Icon className={`w-3.5 h-3.5 ${isActive ? "text-emerald-400" : "text-slate-400"}`} />
@@ -543,6 +533,9 @@ function StockRecommendationsContent() {
             </span>
             {[
               { id: "ALL", label: "All Strategies" },
+              { id: "stage_2", label: "🔥 Stage 2 Leaders", highlight: "amber" },
+              { id: "vcp_squeeze", label: "⚡ VCP Squeeze", highlight: "purple" },
+              { id: "accumulation", label: "💎 Institutional Inflow", highlight: "emerald" },
               { id: "rs_leaders", label: "⚡ RS Leaders (RS ≥ 75)", highlight: "cyan" },
               { id: "breakouts", label: "🚀 52W Breakouts (< 5%)", highlight: "amber" },
               { id: "golden_cross", label: "🌟 Golden Cross", highlight: "purple" },
@@ -622,6 +615,9 @@ function StockRecommendationsContent() {
                 className="rounded-xl bg-slate-900 border border-slate-700/80 px-3 py-1.5 text-xs text-slate-200 focus:border-cyan-500 focus:outline-none cursor-pointer"
               >
                 <option value="score">Quant Score (Highest)</option>
+                <option value="stage_2">🔥 Minervini Stage 2 (Leaders First)</option>
+                <option value="accumulation">💎 Institutional Inflow (A/D Ratio)</option>
+                <option value="vcp">⚡ VCP Squeeze Tightness</option>
                 <option value="rs">Relative Strength (RS Rating)</option>
                 <option value="dist_52w">Distance to 52W High (Closest)</option>
                 <option value="change_pct">24h Gain (%)</option>
@@ -660,7 +656,7 @@ function StockRecommendationsContent() {
                 Strong Buy Signals
               </span>
               <span className="font-mono text-base font-bold text-emerald-400">
-                {stats.strongBuys} Top Ranked
+                {stats.strongBuys} Strong {stats.stage2Count > 0 ? `(${stats.stage2Count} Stage 2)` : ""}
               </span>
             </div>
           </div>
@@ -898,15 +894,17 @@ function StockRecommendationsContent() {
                     </span>
                   </div>
                   <div className="p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/80">
-                    <span className="text-[10px] text-slate-400 uppercase block">RSI (14)</span>
-                    <span className="font-mono font-bold text-slate-200">
-                      {deepDiveStock.rsi.toFixed(1)}
+                    <span className="text-[10px] text-slate-400 uppercase block">Stage 2 Template</span>
+                    <span className="font-mono font-bold text-amber-300">
+                      {deepDiveStock.is_stage_2 ? "🔥 Confirmed" : "Not Aligned"}
                     </span>
                   </div>
                   <div className="p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/80">
-                    <span className="text-[10px] text-slate-400 uppercase block">Vol Confirmation</span>
-                    <span className="font-mono font-bold text-amber-300">
-                      {deepDiveStock.volume_ratio.toFixed(2)}x 20d Avg
+                    <span className="text-[10px] text-slate-400 uppercase block">A/D Inflow Rating</span>
+                    <span className="font-mono font-bold text-emerald-400">
+                      {deepDiveStock.accumulation_rating
+                        ? `${deepDiveStock.accumulation_rating} (${deepDiveStock.up_down_volume_ratio ? deepDiveStock.up_down_volume_ratio.toFixed(1) + "x" : "—"})`
+                        : "—"}
                     </span>
                   </div>
                 </div>

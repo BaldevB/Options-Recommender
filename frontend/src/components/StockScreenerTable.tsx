@@ -82,6 +82,27 @@ export default function StockScreenerTable({
   const getStrategyBadge = (tag?: string) => {
     if (!tag) return <span className="text-slate-500 text-[11px]">—</span>;
     const t = tag.toUpperCase();
+    if (t === "STAGE_2_LEADER") {
+      return (
+        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-[0_0_8px_rgba(245,158,11,0.25)] whitespace-nowrap">
+          🔥 Stage 2
+        </span>
+      );
+    }
+    if (t === "VCP_SQUEEZE") {
+      return (
+        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-[0_0_8px_rgba(168,85,247,0.25)] whitespace-nowrap">
+          ⚡ Squeeze
+        </span>
+      );
+    }
+    if (t === "INSTITUTIONAL_INFLOW") {
+      return (
+        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-[0_0_8px_rgba(16,185,129,0.25)] whitespace-nowrap">
+          💎 Inflow
+        </span>
+      );
+    }
     if (t === "RS_LEADER") {
       return (
         <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 whitespace-nowrap">
@@ -169,6 +190,30 @@ export default function StockScreenerTable({
               </th>
               <th
                 scope="col"
+                className="py-3 px-3 text-center cursor-pointer hover:text-cyan-400 transition-colors"
+                onClick={() => onSort("stage_2")}
+                title="Minervini Stage 2 Superperformance Trend Template"
+              >
+                Stage 2 {renderSortIcon("stage_2")}
+              </th>
+              <th
+                scope="col"
+                className="py-3 px-3 text-center cursor-pointer hover:text-cyan-400 transition-colors"
+                onClick={() => onSort("accumulation")}
+                title="Institutional Accumulation / Distribution Rating (Up/Down Volume)"
+              >
+                A/D Flow {renderSortIcon("accumulation")}
+              </th>
+              <th
+                scope="col"
+                className="py-3 px-3 text-center cursor-pointer hover:text-cyan-400 transition-colors"
+                onClick={() => onSort("vcp")}
+                title="Volatility Contraction Pattern Squeeze Tightness (0-100)"
+              >
+                Squeeze {renderSortIcon("vcp")}
+              </th>
+              <th
+                scope="col"
                 className="py-3 px-3 text-right cursor-pointer hover:text-cyan-400 transition-colors"
                 onClick={() => onSort("rs")}
                 title="Relative Strength Percentile vs Market (0-99)"
@@ -225,7 +270,7 @@ export default function StockScreenerTable({
           <tbody className="divide-y divide-slate-800/60 font-medium">
             {stocks.length === 0 ? (
               <tr>
-                <td colSpan={17} className="py-12 text-center text-slate-500 text-sm">
+                <td colSpan={20} className="py-12 text-center text-slate-500 text-sm">
                   No stock recommendations match your filter criteria.
                 </td>
               </tr>
@@ -308,6 +353,55 @@ export default function StockScreenerTable({
                         {isPositive ? "+" : ""}
                         {stock.change_pct.toFixed(2)}%
                       </span>
+                    </td>
+
+                    {/* Minervini Stage 2 */}
+                    <td className="py-3 px-3 text-center font-mono">
+                      {stock.is_stage_2 ? (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                          🔥 Yes
+                        </span>
+                      ) : (
+                        <span className="text-slate-500 text-[11px]">No</span>
+                      )}
+                    </td>
+
+                    {/* Accumulation / Distribution Inflow */}
+                    <td className="py-3 px-3 text-center font-mono">
+                      {stock.accumulation_rating ? (
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                            stock.accumulation_rating === "A+"
+                              ? "bg-emerald-500/25 text-emerald-300 border border-emerald-500/40"
+                              : stock.accumulation_rating === "A"
+                              ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
+                              : stock.accumulation_rating === "B"
+                              ? "bg-slate-800 text-slate-300 border border-slate-700"
+                              : "bg-rose-500/20 text-rose-300 border border-rose-500/30"
+                          }`}
+                          title={`Up/Down Volume Ratio: ${stock.up_down_volume_ratio ? stock.up_down_volume_ratio.toFixed(2) + "x" : "—"}`}
+                        >
+                          {stock.accumulation_rating} ({stock.up_down_volume_ratio ? stock.up_down_volume_ratio.toFixed(1) : "1.0"}x)
+                        </span>
+                      ) : (
+                        <span className="text-slate-500 text-[11px]">—</span>
+                      )}
+                    </td>
+
+                    {/* VCP Consolidation Squeeze */}
+                    <td className="py-3 px-3 text-center font-mono">
+                      {stock.is_vcp_squeeze ? (
+                        <span
+                          className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40"
+                          title={`Tightness: ${Math.round(stock.consolidation_tightness ?? 50)}/100`}
+                        >
+                          ⚡ Tight ({Math.round(stock.consolidation_tightness ?? 50)})
+                        </span>
+                      ) : (
+                        <span className="text-slate-500 text-[11px]">
+                          {Math.round(stock.consolidation_tightness ?? 50)}
+                        </span>
+                      )}
                     </td>
 
                     {/* RS Rating */}

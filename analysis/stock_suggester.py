@@ -8,7 +8,10 @@ Enhanced with institutional stock selection factors:
 - Relative Strength (RS) percentile rating (vs benchmark)
 - Distance from 52-Week High (%) & Breakout detection
 - Multi-Moving-Average structural alignment (Full Bullish, Golden Cross, Pullback)
-- Strategy preset tagging (RS_LEADER, 52W_BREAKOUT, GOLDEN_CROSS, PULLBACK_DIP, MOMENTUM_SWING)
+- Minervini Stage 2 Superperformance Trend Template Filter
+- Volatility Contraction Pattern (VCP) & Consolidation Squeeze Detector
+- Institutional Accumulation/Distribution (A/D) Inflow Rating & Up/Down Volume Ratio
+- Strategy preset tagging (STAGE_2_LEADER, VCP_SQUEEZE, INSTITUTIONAL_INFLOW, RS_LEADER, 52W_BREAKOUT, GOLDEN_CROSS, PULLBACK_DIP, MOMENTUM_SWING)
 """
 
 from dataclasses import dataclass, field
@@ -62,6 +65,11 @@ class StockRecommendation:
     distance_from_52w_high_pct: float = 0.0
     ma_alignment: str = "NEUTRAL"
     strategy_tag: str = "MOMENTUM_SWING"
+    is_stage_2: bool = False
+    is_vcp_squeeze: bool = False
+    consolidation_tightness: float = 50.0
+    accumulation_rating: str = "B"
+    up_down_volume_ratio: float = 1.0
 
 
 def calculate_atr(
@@ -179,6 +187,194 @@ def evaluate_ma_structure(
     return "NEUTRAL"
 
 
+def evaluate_minervini_stage_2(
+    df: Optional[pd.DataFrame] = None,
+    current_price: float = 100.0,
+    fifty_two_week_high: float = 0.0,
+    fifty_two_week_low: float = 0.0,
+    momentum: Optional[MomentumResult] = None,
+) -> bool:
+    """Evaluate whether an equity meets Mark Minervini's Stage 2 Superperformance Trend Template criteria.
+
+    Criteria:
+    1. Current Price > 50-day Simple Moving Average (SMA)
+    2. Current Price > 200-day Simple Moving Average (SMA)
+    3. 50-day SMA > 200-day SMA
+    4. 200-day SMA is trending upward (or flat-to-rising)
+    5. Current price is within 25% of 52-week high (price >= 0.75 * 52W High)
+    6. Current price is at least 25% above 52-week low (or local low)
+    """
+    sma_50 = getattr(momentum, "sma_50", None) if momentum else None
+    sma_200 = getattr(momentum, "sma_200", None) if momentum else None
+    sma_200_rising = True
+
+    if df is not None and not df.empty and len(df) >= 20:
+        try:
+            closes = df["Close"]
+            if sma_50 is None and len(closes) >= 50:
+                sma_50 = float(closes.rolling(50).mean().iloc[-1])
+            elif sma_50 is None and len(closes) >= 20:
+                sma_50 = float(closes.rolling(20).mean().iloc[-1])
+
+            if sma_200 is None and len(closes) >= 180:
+                sma_200 = float(closes.rolling(min(200, len(closes))).mean().iloc[-1])
+                # Check if 200-day SMA is flat-to-rising over the past 20 sessions
+                if len(closes) >= 200:
+                    roll_200 = closes.rolling(200).mean()
+                    prev_idx = -21 if len(roll_200) >= 21 else -1
+                    sma_200_20d_ago = float(roll_200.iloc[prev_idx])
+                    if not pd.isna(sma_200_20d_ago) and sma_200_20d_ago > 0:
+                        sma_200_rising = sma_200 >= (sma_200_20d_ago * 0.995)
+        except Exception:
+            pass
+
+    # Momentum fallback attributes if SMA values were not directly in dataframe
+    if momentum and momentum.details:
+        if sma_50 is None:
+            above_sma50 = momentum.details.get("above_sma50", False)
+            if above_sma50:
+                sma_50 = current_price * 0.96
+        if sma_200 is None:
+            sma20_above_sma50 = momentum.details.get("sma20_above_sma50", False)
+            if sma20_above_sma50 and sma_50:
+                sma_200 = sma_50 * 0.95
+
+    # Check Moving Average Conditions
+    if sma_50 and sma_200:
+        ma_cond = (current_price > sma_50) and (current_price > sma_200) and (sma_50 > sma_200) and sma_200_rising
+    elif sma_50:
+        ma_cond = current_price > sma_50
+    elif momentum and momentum.details:
+        ma_cond = bool(momentum.details.get("above_sma50", False))
+    else:
+        ma_cond = False
+
+    # Check 52W High Condition: Within 25% of 52W High
+    high_cond = True
+    if fifty_two_week_high > 0:
+        high_cond = current_price >= (fifty_two_week_high * 0.75)
+
+    # Check 52W Low Condition: At least 25% above 52W Low
+    low_cond = True
+    if fifty_two_week_low > 0:
+        low_cond = current_price >= (fifty_two_week_low * 1.25)
+    elif df is not None and not df.empty and len(df) >= 20:
+        try:
+            low_min = float(df["Low"].min())
+            if low_min > 0:
+                low_cond = current_price >= (low_min * 1.20)
+        except Exception:
+            pass
+
+    return bool(ma_cond and high_cond and low_cond)
+
+
+def evaluate_vcp_squeeze(
+    df: Optional[pd.DataFrame] = None,
+    current_price: float = 100.0,
+) -> Tuple[bool, float]:
+    """Detect Volatility Contraction Pattern (VCP) & Consolidation Squeeze.
+
+    Evaluates:
+    - Range compression: 10-day High-Low range relative to 30-day High-Low range.
+    - Bollinger Band width: 10-day bandwidth relative to mean close.
+
+    Returns:
+        Tuple[bool, float]: (is_vcp_squeeze, consolidation_tightness_score_0_to_100)
+    """
+    if df is not None and not df.empty and len(df) >= 15:
+        try:
+            highs = df["High"]
+            lows = df["Low"]
+            closes = df["Close"]
+
+            len_10 = min(len(df), 10)
+            len_30 = min(len(df), 30)
+
+            range_10 = float(highs.iloc[-len_10:].max() - lows.iloc[-len_10:].min())
+            range_30 = float(highs.iloc[-len_30:].max() - lows.iloc[-len_30:].min())
+            range_ratio = (range_10 / range_30) if range_30 > 0 else 1.0
+
+            # Range compression tightness (up to 55 pts)
+            range_tightness = max(0.0, min(55.0, (1.0 - (range_ratio / 0.8)) * 55.0)) if range_ratio < 0.8 else 0.0
+
+            # BB width on recent consolidation window (10 days)
+            w = min(len(closes), 10)
+            rolling_window = closes.iloc[-w:]
+            mean_10 = float(rolling_window.mean())
+            std_10 = float(rolling_window.std()) if len(rolling_window) > 1 else 0.0
+            bb_width = (4.0 * std_10) / mean_10 if mean_10 > 0 else 0.10
+
+            # BB width tightness (up to 45 pts)
+            # BB width <= 4% gives max tightness; >= 14% gives 0.
+            bb_tightness = max(0.0, min(45.0, (0.14 - bb_width) / 0.14 * 45.0))
+
+            tightness = round(max(5.0, min(99.0, range_tightness + bb_tightness)), 1)
+            is_squeeze = bool(tightness >= 60.0 or (range_ratio <= 0.50 and bb_width <= 0.08))
+            return is_squeeze, tightness
+        except Exception:
+            pass
+
+    return False, 50.0
+
+
+def evaluate_accumulation_distribution(
+    df: Optional[pd.DataFrame] = None,
+    volume_ratio: float = 1.0,
+    mom_score: float = 0.0,
+) -> Tuple[str, float]:
+    """Evaluate Institutional Up/Down Volume Ratio & Accumulation/Distribution Inflow Rating (A+, A, B, C, D).
+
+    Calculates the 30-day ratio of volume on up days vs volume on down days:
+    - A+: Ratio >= 1.50 (Aggressive institutional accumulation)
+    - A:  Ratio 1.25 to 1.49 (Solid institutional buying pressure)
+    - B:  Ratio 0.95 to 1.24 (Neutral/balanced flow)
+    - C:  Ratio 0.75 to 0.94 (Mild distribution)
+    - D:  Ratio < 0.75 (Heavy institutional liquidation/distribution)
+
+    Returns:
+        Tuple[str, float]: (accumulation_rating, up_down_volume_ratio)
+    """
+    if df is not None and not df.empty and len(df) >= 8 and "Volume" in df.columns:
+        try:
+            sub = df.iloc[-min(len(df), 30):].copy()
+            closes = sub["Close"]
+            diffs = closes.diff()
+
+            up_mask = diffs > 0
+            down_mask = diffs < 0
+
+            up_volume = float(sub.loc[up_mask, "Volume"].sum())
+            down_volume = float(sub.loc[down_mask, "Volume"].sum())
+
+            if down_volume > 0:
+                raw_ratio = up_volume / down_volume
+            elif up_volume > 0:
+                raw_ratio = 2.50
+            else:
+                raw_ratio = 1.00
+
+            ratio = round(max(0.10, min(5.00, raw_ratio)), 2)
+        except Exception:
+            ratio = round(max(0.40, min(3.00, 1.0 + (mom_score * 0.8) + ((volume_ratio - 1.0) * 0.4))), 2)
+    else:
+        # Fallback estimation using momentum score & volume ratio
+        ratio = round(max(0.40, min(3.00, 1.0 + (mom_score * 0.8) + ((volume_ratio - 1.0) * 0.4))), 2)
+
+    if ratio >= 1.50:
+        rating = "A+"
+    elif ratio >= 1.25:
+        rating = "A"
+    elif ratio >= 0.95:
+        rating = "B"
+    elif ratio >= 0.75:
+        rating = "C"
+    else:
+        rating = "D"
+
+    return rating, ratio
+
+
 def evaluate_strategy_tag(
     relative_strength: float,
     dist_52w_pct: float,
@@ -186,25 +382,40 @@ def evaluate_strategy_tag(
     rsi: float,
     volume_ratio: float,
     mom_score: float,
+    is_stage_2: bool = False,
+    is_vcp_squeeze: bool = False,
+    accumulation_rating: str = "B",
 ) -> str:
     """Classify the primary high-confidence stock selection strategy."""
-    # 52-Week High Breakout
+    # 1. Minervini Stage 2 Superperformance Leader
+    if is_stage_2 and relative_strength >= 78.0 and mom_score > 0.15:
+        return "STAGE_2_LEADER"
+
+    # 2. Volatility Contraction Pattern (VCP) Squeeze
+    if is_vcp_squeeze and mom_score >= 0.05 and ma_alignment != "BELOW_200DMA":
+        return "VCP_SQUEEZE"
+
+    # 3. Institutional Inflow / Heavy Accumulation
+    if accumulation_rating == "A+" and mom_score > 0.10:
+        return "INSTITUTIONAL_INFLOW"
+
+    # 4. 52-Week High Breakout
     if dist_52w_pct >= -7.0 and volume_ratio >= 1.20 and mom_score > 0.15:
         return "52W_BREAKOUT"
 
-    # Relative Strength Market Leader
+    # 5. Relative Strength Market Leader
     if relative_strength >= 78.0 and mom_score > 0.10:
         return "RS_LEADER"
 
-    # Golden Cross Momentum
+    # 6. Golden Cross Momentum
     if ma_alignment in ("FULL_BULLISH", "GOLDEN_CROSS") and mom_score > 0.20:
         return "GOLDEN_CROSS"
 
-    # Pullback / Dip Buy into Moving Average Support
+    # 7. Pullback / Dip Buy into Moving Average Support
     if rsi <= 44.0 and mom_score >= -0.20 and ma_alignment != "BELOW_200DMA":
         return "PULLBACK_DIP"
 
-    # Volume Breakout
+    # 8. Volume Surge
     if volume_ratio >= 1.40 and mom_score > 0.10:
         return "VOLUME_SURGE"
 
@@ -490,6 +701,7 @@ def generate_stock_recommendation(
     day_low = 0.0
     quote_beta = None
     fifty_two_week_high = 0.0
+    fifty_two_week_low = 0.0
 
     if quote is not None:
         if isinstance(quote, QuoteData):
@@ -498,12 +710,14 @@ def generate_stock_recommendation(
             day_low = quote.day_low
             quote_beta = quote.beta
             fifty_two_week_high = getattr(quote, "fifty_two_week_high", 0.0)
+            fifty_two_week_low = getattr(quote, "fifty_two_week_low", 0.0)
         elif isinstance(quote, dict):
             current_price = float(quote.get("current_price", 0.0))
             day_high = float(quote.get("day_high", 0.0))
             day_low = float(quote.get("day_low", 0.0))
             quote_beta = quote.get("beta")
             fifty_two_week_high = float(quote.get("fifty_two_week_high", 0.0))
+            fifty_two_week_low = float(quote.get("fifty_two_week_low", 0.0))
 
     if current_price <= 0.0 and momentum is not None:
         current_price = momentum.last_close
@@ -522,6 +736,15 @@ def generate_stock_recommendation(
 
     if fifty_two_week_high <= 0.0:
         fifty_two_week_high = current_price * 1.05
+
+    if fifty_two_week_low <= 0.0 and df is not None and not df.empty:
+        try:
+            fifty_two_week_low = float(df["Low"].min())
+        except Exception:
+            fifty_two_week_low = current_price * 0.75
+
+    if fifty_two_week_low <= 0.0:
+        fifty_two_week_low = current_price * 0.75
 
     if beta is None and quote_beta is not None:
         try:
@@ -555,6 +778,24 @@ def generate_stock_recommendation(
     vol_ratio = getattr(momentum, "volume_ratio", 1.0) if momentum is not None else 1.0
     rsi_val = getattr(momentum, "rsi", 50.0) if momentum is not None else 50.0
 
+    # Institutional quantitative criteria
+    is_stage_2 = evaluate_minervini_stage_2(
+        df=df,
+        current_price=current_price,
+        fifty_two_week_high=fifty_two_week_high,
+        fifty_two_week_low=fifty_two_week_low,
+        momentum=momentum,
+    )
+    is_vcp_squeeze, consolidation_tightness = evaluate_vcp_squeeze(
+        df=df,
+        current_price=current_price,
+    )
+    accumulation_rating, up_down_volume_ratio = evaluate_accumulation_distribution(
+        df=df,
+        volume_ratio=vol_ratio,
+        mom_score=mom_score,
+    )
+
     strategy_tag = evaluate_strategy_tag(
         relative_strength=relative_strength,
         dist_52w_pct=dist_52w_pct,
@@ -562,6 +803,9 @@ def generate_stock_recommendation(
         rsi=rsi_val,
         volume_ratio=vol_ratio,
         mom_score=mom_score,
+        is_stage_2=is_stage_2,
+        is_vcp_squeeze=is_vcp_squeeze,
+        accumulation_rating=accumulation_rating,
     )
 
     # Confidence calculation
@@ -584,6 +828,18 @@ def generate_stock_recommendation(
         raw_score += 3.0
 
     # Institutional selection boosts
+    if is_stage_2:
+        raw_score += 4.5
+    if is_vcp_squeeze:
+        raw_score += 4.0
+
+    if accumulation_rating == "A+":
+        raw_score += 4.0
+    elif accumulation_rating == "A":
+        raw_score += 2.5
+    elif accumulation_rating == "D":
+        raw_score -= 5.0
+
     if strategy_tag == "RS_LEADER" or relative_strength >= 80.0:
         raw_score += 4.0
     if strategy_tag == "52W_BREAKOUT" or dist_52w_pct >= -4.0:
@@ -614,6 +870,14 @@ def generate_stock_recommendation(
     rationale = []
     rationale.append(f"Setup Strategy: {strategy_tag} (RS Rating: {relative_strength:.0f}/99, {dist_52w_pct:+.1f}% from 52W High)")
     rationale.append(f"Moving Average Alignment: {ma_alignment}")
+
+    if is_stage_2:
+        rationale.append("Minervini Stage 2 Confirmed: Full uptrend template with price > 50 DMA > 200 DMA.")
+
+    if is_vcp_squeeze:
+        rationale.append(f"VCP Squeeze Active: Volatility compression tightness score of {consolidation_tightness:.0f}/100.")
+
+    rationale.append(f"Institutional Flow: {accumulation_rating} Rating (Up/Down Volume Ratio: {up_down_volume_ratio:.2f}x).")
 
     if momentum is not None:
         rationale.append(f"Momentum: Score {mom_score:+.2f} ({momentum.trend_description})")
@@ -654,4 +918,9 @@ def generate_stock_recommendation(
         distance_from_52w_high_pct=dist_52w_pct,
         ma_alignment=ma_alignment,
         strategy_tag=strategy_tag,
+        is_stage_2=is_stage_2,
+        is_vcp_squeeze=is_vcp_squeeze,
+        consolidation_tightness=consolidation_tightness,
+        accumulation_rating=accumulation_rating,
+        up_down_volume_ratio=up_down_volume_ratio,
     )
