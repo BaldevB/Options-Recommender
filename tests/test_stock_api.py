@@ -283,3 +283,37 @@ def test_bounded_price_cache_eviction():
     # Cache should never exceed MAX_PRICE_CACHE_ENTRIES
     assert len(_CACHE) <= MAX_PRICE_CACHE_ENTRIES
     clear_price_cache()
+
+
+def test_api_options_recommendations_endpoint():
+    """GET /api/options/recommendations returns 200 OK with categorized curated options."""
+    client = TestClient(app)
+    resp = client.get("/api/options/recommendations")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "items" in data
+    assert "market_regime" in data
+    assert "total" in data
+    assert isinstance(data["items"], list)
+    assert len(data["items"]) > 0
+
+    first = data["items"][0]
+    assert "symbol" in first
+    assert "contract" in first
+    assert "option_type" in first
+    assert "strike" in first
+    assert "dte" in first
+    assert "delta" in first
+    assert "strategy_category" in first
+
+    # Test filtering by category
+    resp_cat = client.get("/api/options/recommendations?category=DIRECTIONAL")
+    assert resp_cat.status_code == 200
+    for item in resp_cat.json()["items"]:
+        assert item["strategy_category"] == "DIRECTIONAL"
+
+    # Test filtering by bias
+    resp_bias = client.get("/api/options/recommendations?bias=CALL")
+    assert resp_bias.status_code == 200
+    for item in resp_bias.json()["items"]:
+        assert item["bias"] == "BULLISH" or item["option_type"] == "CALL"

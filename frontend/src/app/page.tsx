@@ -5,6 +5,7 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import {
   TrendingUp,
+  Target,
   Wallet,
   Activity,
   Scale,
@@ -69,6 +70,16 @@ const PaperTradingTracker = dynamic(() => import("@/components/PaperTradingTrack
   ),
 });
 
+const BestOptionsHome = dynamic(() => import("@/components/BestOptionsHome"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-72 w-full items-center justify-center rounded-2xl border border-slate-800 bg-[#090e1a] text-slate-400">
+      <RefreshCw className="mr-2 h-5 w-5 animate-spin text-cyan-400" />
+      Loading Best Options Recommendations...
+    </div>
+  ),
+});
+
 const OptionsChainMatrix = dynamic(() => import("@/components/OptionsChainMatrix"), {
   ssr: false,
   loading: () => (
@@ -85,7 +96,7 @@ export default function Home() {
   const [aiPickContracts, setAiPickContracts] = useState<Record<string, number>>({});
   const [paperToast, setPaperToast] = useState<{ message: string; id: number } | null>(null);
 
-  const [activeTab, setActiveTab] = useState<"terminal" | "chain_matrix" | "volatility" | "builder" | "watchlist" | "ai_picks" | "high_risk" | "zero_dte" | "paper_trading">("terminal");
+  const [activeTab, setActiveTab] = useState<"home" | "terminal" | "chain_matrix" | "volatility" | "builder" | "watchlist" | "ai_picks" | "high_risk" | "zero_dte" | "paper_trading">("home");
   const [starredTickers, setStarredTickers] = useState<string[]>(["NVDA", "AAPL", "SPY", "QQQ", "TSLA"]);
 
   useEffect(() => {
@@ -251,7 +262,9 @@ export default function Home() {
 
       if (isInput) return;
 
-      if (e.key === "/") {
+      if (e.key === "0" || e.key === "h" || e.key === "H") {
+        setActiveTab("home");
+      } else if (e.key === "/") {
         e.preventDefault();
         searchInputRef.current?.focus();
         searchInputRef.current?.select();
@@ -533,6 +546,18 @@ export default function Home() {
             <div className="flex min-w-0 flex-1 justify-center px-1">
               <div className="flex items-center space-x-1 overflow-x-auto rounded-xl border border-slate-800/90 bg-[#0a1120] p-1 text-xs scrollbar-none max-w-full">
                 <button
+                  onClick={() => setActiveTab("home")}
+                  className={`flex shrink-0 items-center space-x-1.5 rounded-lg px-2.5 py-1.5 font-medium transition whitespace-nowrap ${
+                    activeTab === "home"
+                      ? "bg-cyan-500/20 text-cyan-300 shadow-sm border border-cyan-500/40"
+                      : "text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  <Target className="h-3.5 w-3.5 text-cyan-400" />
+                  <span>?? Best Options</span>
+                </button>
+
+                <button
                   onClick={() => setActiveTab("terminal")}
                   className={`flex shrink-0 items-center space-x-1.5 rounded-lg px-2.5 py-1.5 font-medium transition whitespace-nowrap ${
                     activeTab === "terminal"
@@ -756,6 +781,36 @@ export default function Home() {
             <AlertTriangle className="h-5 w-5 text-red-400" />
             <span>{error}</span>
           </div>
+        )}
+
+        {/* ========================================================= */}
+        {/* VIEW 0: BEST OPTIONS HOME (DEFAULT VIEW)                  */}
+        {/* ========================================================= */}
+        {activeTab === "home" && (
+          <BestOptionsHome
+            onSelectTicker={(sym) => {
+              setSearchInput(sym);
+              setTicker(sym);
+              fetchAnalysis(sym);
+              setActiveTab("terminal");
+            }}
+            onOpenChain={(sym) => {
+              setSearchInput(sym);
+              setTicker(sym);
+              setActiveTab("chain_matrix");
+            }}
+            onPaperBuy={(rec: any) => {
+              buyInPaperPortfolio(
+                rec,
+                rec.symbol,
+                rec.option_type,
+                rec.suggested_contracts,
+                `Best Options (${rec.strategy_label})`
+              );
+            }}
+            starredTickers={starredTickers}
+            onToggleStar={toggleStar}
+          />
         )}
 
         {/* ========================================================= */}
