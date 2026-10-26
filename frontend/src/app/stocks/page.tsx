@@ -37,6 +37,7 @@ import StockCard, { StockRecommendationItem } from "@/components/StockCard";
 import StockScreenerTable from "@/components/StockScreenerTable";
 import StockPositionCalculator from "@/components/StockPositionCalculator";
 import StockPaperTradingDrawer from "@/components/StockPaperTradingDrawer";
+import { StockMonteCarlo } from "@/components/StockMonteCarlo";
 
 // Dynamically import StockChart with ssr: false for Lightweight Charts canvas support
 const StockChart = dynamic(() => import("@/components/StockChart"), {
@@ -107,6 +108,7 @@ function StockRecommendationsContent() {
   const [deepDiveAnalysis, setDeepDiveAnalysis] = useState<any>(null);
   const [deepDiveCandles, setDeepDiveCandles] = useState<any[]>([]);
   const [deepDiveLoading, setDeepDiveLoading] = useState<boolean>(false);
+  const [deepDiveTab, setDeepDiveTab] = useState<"overview" | "monte_carlo">("overview");
 
   // Quick Calculator Modal
   const [calculatorStock, setCalculatorStock] = useState<StockRecommendationItem | null>(null);
@@ -260,6 +262,7 @@ function StockRecommendationsContent() {
   const openDeepDive = useCallback(
     async (stk: StockRecommendationItem) => {
       setDeepDiveStock(stk);
+      setDeepDiveTab("overview");
       setDeepDiveLoading(true);
       setDeepDiveAnalysis(null);
       setDeepDiveCandles([]);
@@ -821,8 +824,50 @@ function StockRecommendationsContent() {
               </div>
             </div>
 
+            {/* Modal Tabs Bar */}
+            <div className="flex items-center gap-2 px-4 sm:px-6 py-2.5 bg-slate-950 border-b border-slate-800">
+              <button
+                type="button"
+                onClick={() => setDeepDiveTab("overview")}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                  deepDiveTab === "overview"
+                    ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-[0_0_12px_rgba(6,182,212,0.25)] font-bold"
+                    : "text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent"
+                }`}
+              >
+                <Activity className="w-3.5 h-3.5" />
+                <span>Overview &amp; Technicals</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setDeepDiveTab("monte_carlo")}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                  deepDiveTab === "monte_carlo"
+                    ? "bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-[0_0_12px_rgba(168,85,247,0.25)] font-bold"
+                    : "text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent"
+                }`}
+              >
+                <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+                <span>Monte Carlo Simulation (GBM)</span>
+              </button>
+            </div>
+
             {/* Modal Body */}
             <div className="overflow-y-auto p-4 sm:p-6 space-y-6 flex-1">
+              {deepDiveTab === "monte_carlo" ? (
+                <StockMonteCarlo
+                  symbol={deepDiveStock.symbol}
+                  currentPrice={
+                    deepDiveStock.price > 0
+                      ? deepDiveStock.price
+                      : deepDiveStock.trade_plan.current_price
+                  }
+                  initialTp1={deepDiveStock.trade_plan.tp1}
+                  initialStopLoss={deepDiveStock.trade_plan.stop_loss}
+                />
+              ) : (
+                <>
               {/* TradingView Chart */}
               <div>
                 <div className="flex items-center justify-between mb-2">
@@ -942,6 +987,8 @@ function StockRecommendationsContent() {
                   onClose={() => setDeepDiveStock(null)}
                 />
               </div>
+                </>
+              )}
             </div>
           </div>
         </div>

@@ -1221,3 +1221,47 @@ async def post_stocks_refresh_endpoint(
     cache = get_screener_cache()
     res = cache.refresh_cache(force=req_force, tickers=req_tickers)
     return sanitize_json(res)
+
+
+@app.get("/api/stocks/monte-carlo")
+def get_stocks_monte_carlo_endpoint(
+    symbol: Optional[str] = None,
+    ticker: Optional[str] = None,
+    simulations: int = 2000,
+    days: int = 30,
+    tp1: Optional[float] = None,
+    stop_loss: Optional[float] = None,
+):    
+    """Execute vectorized Monte Carlo price projection simulation (GBM).
+
+    Returns percentile fan-trajectories, target touch probabilities,
+    first-touch win rate, and Value at Risk (VaR 95% & 99%).
+    """
+    from dataclasses import asdict
+    from analysis.monte_carlo import run_monte_carlo_simulation
+
+    target_symbol = (symbol or ticker or "").strip().upper()
+    if not target_symbol:
+        raise HTTPException(status_code=400, detail="Stock symbol parameter is required")
+
+    quote = get_current_quote(target_symbol)
+    cur_price = float(quote.get("current_price", 0.0))
+    if cur_price <= 0.0:
+        hist = get_price_history(target_symbol, period="1mo")
+        if hist is not None and not hist.empty:
+            cur_price = float(hist["Close"].iloc[-1])
+        else:
+            cur_price = 100.0
+
+    hist_data = get_price_history(target_symbol, period="6mo")
+
+    res = run_monte_carlo_simulation(
+        symbol=target_symbol,
+        current_price=cur_price,
+        df=hist_data,
+        simulations=simulations,
+        forecast_days=days,
+        tp1=tp1,
+        stop_loss=stop_loss,
+    )
+    return sanitize_json(asdict(res))

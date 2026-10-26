@@ -1,4 +1,4 @@
-"""Technical and sentiment analysis package."""
+"""Technical, sentiment, and quantitative risk modeling package."""
 
 from analysis.stock_suggester import (
     TradeHorizon,
@@ -12,6 +12,10 @@ from analysis.screener_cache import (
     get_screener_cache,
     fetch_single_stock_analysis,
 )
+from analysis.monte_carlo import (
+    MonteCarloResult,
+    run_monte_carlo_simulation,
+)
 
 __all__ = [
     "TradeHorizon",
@@ -22,4 +26,6 @@ __all__ = [
     "StockScreenerCache",
     "get_screener_cache",
     "fetch_single_stock_analysis",
+    "MonteCarloResult",
+    "run_monte_carlo_simulation",
 ]
