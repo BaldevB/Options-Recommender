@@ -74,22 +74,7 @@ def filter_expirations_by_dte(
             if min_dte <= dte <= max_dte:
                 valid_exps.append((exp, dte))
 
-    # If strict filter yields nothing, gracefully fallback
-    if not valid_exps and all_with_dte:
-        if min_dte <= 0:
-            # 0DTE requested: pick earliest non-negative DTE expirations
-            for exp, dte in sorted(all_with_dte, key=lambda x: x[1]):
-                if dte >= 0:
-                    valid_exps.append((exp, dte))
-                    if len(valid_exps) >= 2:
-                        break
-        else:
-            for exp, dte in all_with_dte:
-                if dte >= 2:
-                    valid_exps.append((exp, dte))
-                    if len(valid_exps) >= 3:
-                        break
-
+        # Strict DTE filtering: return only expirations within requested window
     return valid_exps
 
 
@@ -114,12 +99,7 @@ def _clean_chain_df(df: pd.DataFrame, expiration: str, dte: int, option_type: st
     clean["dte"] = dte
     clean["type"] = option_type.upper()
 
-    # After-hours / zero-quote fallback: If ask is 0.0 but lastPrice > 0, estimate bid & ask from lastPrice
-    zero_quote_mask = (clean["ask"] <= 0.0) & (clean["lastPrice"] > 0.0)
-    if zero_quote_mask.any():
-        clean.loc[zero_quote_mask, "ask"] = (clean.loc[zero_quote_mask, "lastPrice"] * 1.01).round(2)
-        clean.loc[zero_quote_mask, "bid"] = (clean.loc[zero_quote_mask, "lastPrice"] * 0.99).round(2)
-
+    # Do not fabricate bid or ask from lastPrice. Keep lastPrice separate.
     # Calculate spread and spread ratio
     clean["spread"] = (clean["ask"] - clean["bid"]).clip(lower=0.0)
     clean["spread_ratio"] = clean.apply(
@@ -157,11 +137,6 @@ def get_options_chains(
         return pd.DataFrame(), pd.DataFrame(), []
 
     target_expirations = filter_expirations_by_dte(all_expirations, min_dte, max_dte)
-    if not target_expirations:
-        if min_dte <= 0:
-            target_expirations = filter_expirations_by_dte(all_expirations, min_dte=0, max_dte=7)
-        else:
-            target_expirations = filter_expirations_by_dte(all_expirations, min_dte=2, max_dte=60)
     if not target_expirations:
         return pd.DataFrame(), pd.DataFrame(), []
 

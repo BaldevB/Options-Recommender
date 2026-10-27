@@ -497,8 +497,8 @@ def build_option_trade_plan(
     }
 
     # Phase 1: Broker Bracket Order Generator (Standard, TOS, IBKR, Webull)
-    half_contracts = max(1, contracts // 2)
-    rem_contracts = max(1, contracts - half_contracts)
+    half_contracts = (contracts // 2) if contracts > 0 else 0
+    rem_contracts = (contracts - half_contracts) if contracts > 0 else 0
     opt_label = f"{contract_symbol}" if contract_symbol else f"{'CALL' if is_call else 'PUT'} ${strike:.1f}"
 
     broker_bracket_order = {
@@ -579,20 +579,20 @@ def compute_position_sizing(
     risk_cfg: RiskManagementConfig,
     custom_risk_pct: Optional[float] = None
 ) -> Tuple[int, float, float, float]:
-    """Calculate position size and stop loss in dollars based on account equity and risk percentage."""
+    """Calculate position size and stop loss in dollars based on account equity and risk percentage.
+
+    If 1 contract exceeds the risk budget, returns 0 contracts (does NOT force 1).
+    """
     max_loss_one = contract_cost * 100.0
     effective_risk_pct = custom_risk_pct if custom_risk_pct is not None else risk_cfg.max_risk_pct
     budget = risk_cfg.account_equity * effective_risk_pct
+    stop_loss_price = round(contract_cost * (1.0 - risk_cfg.stop_loss_pct), 2)
 
-    if max_loss_one <= 0:
-        return 1, 0.0, 0.0, 0.0
+    if max_loss_one <= 0 or budget < max_loss_one:
+        return 0, 0.0, stop_loss_price, 0.0
 
     contracts = int(budget // max_loss_one)
-    if contracts < 1:
-        contracts = 1
-
     total_max_loss = round(contracts * max_loss_one, 2)
-    stop_loss_price = round(contract_cost * (1.0 - risk_cfg.stop_loss_pct), 2)
     stop_loss_dollar = round(total_max_loss * risk_cfg.stop_loss_pct, 2)
 
     return contracts, total_max_loss, stop_loss_price, stop_loss_dollar
@@ -725,6 +725,11 @@ def rank_and_filter_contracts(
         contracts, total_loss, stop_px, stop_dollar = compute_position_sizing(ask_val, risk_cfg)
 
         warnings = []
+        if contracts == 0:
+            budget_val = risk_cfg.account_equity * (risk_cfg.max_risk_pct)
+            warnings.append(
+                f"Capital requirement (${ask_val * 100:.0f}/contract) exceeds risk allocation budget (${budget_val:.0f}). Sized to 0 contracts."
+            )
         if iv_pct >= filter_cfg.elevated_iv_threshold:
             warnings.append(f"Elevated IV ({iv_pct}%) – High volatility premium; consider debit spread.")
         if spread_pct > 7.0:
