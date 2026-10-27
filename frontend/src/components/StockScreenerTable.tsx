@@ -14,6 +14,7 @@ import {
   Layers,
   Star,
   ExternalLink,
+  Wallet,
 } from "lucide-react";
 import { StockRecommendationItem } from "./StockCard";
 
@@ -286,7 +287,7 @@ export default function StockScreenerTable({
           <tbody className="divide-y divide-slate-800/60 font-medium">
             {stocks.length === 0 ? (
               <tr>
-                <td colSpan={20} className="py-12 text-center text-slate-500 text-sm">
+                <td colSpan={22} className="py-12 text-center text-slate-500 text-sm">
                   No stock recommendations match your filter criteria.
                 </td>
               </tr>
@@ -322,9 +323,26 @@ export default function StockScreenerTable({
                     {/* Ticker & Name */}
                     <td className="py-3 px-3">
                       <div className="flex flex-col">
-                        <span className="font-mono font-bold text-slate-100 text-sm group-hover:text-cyan-300 transition-colors">
-                          {stock.symbol}
-                        </span>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-mono font-bold text-slate-100 text-sm group-hover:text-cyan-300 transition-colors">
+                            {stock.symbol}
+                          </span>
+                          {stock.earnings_days_away !== null &&
+                            stock.earnings_days_away !== undefined &&
+                            stock.earnings_days_away >= 0 &&
+                            stock.earnings_days_away <= 14 && (
+                              <span
+                                className={`inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded text-[10px] font-mono font-bold whitespace-nowrap ${
+                                  stock.earnings_days_away <= 7
+                                    ? "bg-rose-500/20 text-rose-300 border border-rose-500/40 shadow-[0_0_6px_rgba(244,63,94,0.25)] animate-pulse"
+                                    : "bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-[0_0_6px_rgba(245,158,11,0.2)]"
+                                }`}
+                                title={`Upcoming earnings in ${stock.earnings_days_away}d`}
+                              >
+                                ⚠️ {stock.earnings_days_away === 0 ? "Today" : `${stock.earnings_days_away}d`}
+                              </span>
+                            )}
+                        </div>
                         <span className="text-[11px] text-slate-400 line-clamp-1 max-w-[120px]" title={stock.name}>
                           {stock.name}
                         </span>
@@ -593,16 +611,17 @@ export default function StockScreenerTable({
                           className="px-2 py-1 rounded bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 border border-emerald-500/40 text-[11px] font-semibold transition-colors inline-flex items-center gap-1 shadow-sm"
                           title="Execute Paper Buy"
                         >
-                          <Zap className="w-3 h-3 text-emerald-400 fill-emerald-400/40" />
+                          <Wallet className="w-3 h-3 text-emerald-400" />
                           Buy
                         </button>
 
                         <Link
-                          href={`/?ticker=${encodeURIComponent(stock.symbol)}`}
-                          className="p-1 rounded bg-slate-800/60 hover:bg-slate-700 text-slate-400 hover:text-cyan-300 border border-slate-700/60 transition-colors"
-                          title="View Options"
+                          href={`/?ticker=${encodeURIComponent(stock.symbol)}&action=options`}
+                          className="px-2 py-1 rounded bg-cyan-600/25 hover:bg-cyan-600/45 text-cyan-300 border border-cyan-500/40 text-[11px] font-semibold transition-colors inline-flex items-center gap-1 shadow-[0_0_8px_rgba(6,182,212,0.2)]"
+                          title={`Find Best Option for ${stock.symbol}`}
                         >
-                          <Layers className="w-3 h-3" />
+                          <Zap className="w-3 h-3 text-cyan-400" />
+                          Option
                         </Link>
                       </div>
                     </td>

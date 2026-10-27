@@ -30,6 +30,7 @@ import {
   DollarSign,
   ChevronDown,
   ExternalLink,
+  Download,
 } from "lucide-react";
 
 import MarketRibbon from "@/components/MarketRibbon";
@@ -67,6 +68,23 @@ interface ScreenerStatus {
   refresh_interval_sec?: number;
 }
 
+const STRATEGY_PRESETS = [
+  { id: "ALL", label: "⚡ All Setups" },
+  { id: "STAGE_2_LEADERS", label: "🏆 Minervini Stage 2", highlight: "amber" },
+  { id: "VCP_SQUEEZES", label: "🗜️ VCP Squeezes", highlight: "purple" },
+  { id: "INSTITUTIONAL_INFLOW", label: "🏦 Institutional Inflow A+", highlight: "emerald" },
+  { id: "VELOCITY_BREAKOUT", label: "🚀 Velocity Breakouts", highlight: "cyan" },
+  { id: "PULLBACK_DIP", label: "📉 Pullback Dips", highlight: "emerald" },
+];
+
+const PRICE_RANGE_OPTIONS = [
+  { id: "ALL", label: "All Prices" },
+  { id: "UNDER_25", label: "Under $25" },
+  { id: "25_TO_100", label: "$25 - $100" },
+  { id: "100_TO_250", label: "$100 - $250" },
+  { id: "ABOVE_250", label: "$250+" },
+];
+
 const STORAGE_KEY_POSITIONS = "options_paper_positions";
 const STORAGE_KEY_BALANCE = "options_paper_balance";
 const STORAGE_KEY_STARRED = "options_starred_tickers";
@@ -79,11 +97,15 @@ function StockRecommendationsContent() {
   const initialSymbol = searchParams.get("symbol") || searchParams.get("ticker") || "";
   const initialHorizon = searchParams.get("horizon") || "ALL";
   const initialStrategy = searchParams.get("strategy") || "ALL";
+  const initialPreset = searchParams.get("strategy_preset") || searchParams.get("preset") || "ALL";
+  const initialPriceRange = searchParams.get("price_range") || "ALL";
 
   // Navigation & View mode
   const [viewMode, setViewMode] = useState<"grid" | "table">("grid");
   const [activeHorizon, setActiveHorizon] = useState<string>(initialHorizon);
   const [activeStrategy, setActiveStrategy] = useState<string>(initialStrategy);
+  const [activePreset, setActivePreset] = useState<string>(initialPreset);
+  const [priceRange, setPriceRange] = useState<string>(initialPriceRange);
   const [selectedSector, setSelectedSector] = useState<string>("ALL");
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [sortBy, setSortBy] = useState<string>("score");
@@ -123,6 +145,22 @@ function StockRecommendationsContent() {
       setToastMessage((cur) => (cur === msg ? null : cur));
     }, 4500);
   };
+
+  // Price Bounds mapping
+  const priceBounds = useMemo(() => {
+    switch (priceRange) {
+      case "UNDER_25":
+        return { min: undefined, max: 25 };
+      case "25_TO_100":
+        return { min: 25, max: 100 };
+      case "100_TO_250":
+        return { min: 100, max: 250 };
+      case "ABOVE_250":
+        return { min: 250, max: undefined };
+      default:
+        return { min: undefined, max: undefined };
+    }
+  }, [priceRange]);
 
   // Load Starred and Paper state from localStorage
   useEffect(() => {
@@ -206,7 +244,9 @@ function StockRecommendationsContent() {
       if (activeHorizon && activeHorizon !== "ALL") {
         params.set("horizon", activeHorizon);
       }
-      if (activeStrategy && activeStrategy !== "ALL") {
+      if (activePreset && activePreset !== "ALL") {
+        params.set("strategy_preset", activePreset);
+      } else if (activeStrategy && activeStrategy !== "ALL") {
         params.set("strategy", activeStrategy);
       }
       if (selectedSector && selectedSector !== "ALL") {
@@ -214,6 +254,12 @@ function StockRecommendationsContent() {
       }
       if (searchQuery.trim()) {
         params.set("search", searchQuery.trim());
+      }
+      if (priceBounds.min !== undefined) {
+        params.set("min_price", priceBounds.min.toString());
+      }
+      if (priceBounds.max !== undefined) {
+        params.set("max_price", priceBounds.max.toString());
       }
       params.set("sort_by", sortBy);
       params.set("limit", "100");
@@ -235,7 +281,7 @@ function StockRecommendationsContent() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [activeHorizon, activeStrategy, selectedSector, searchQuery, sortBy]);
+  }, [activeHorizon, activeStrategy, activePreset, priceBounds, selectedSector, searchQuery, sortBy]);
 
   // Initial and reactive fetch
   useEffect(() => {
@@ -375,6 +421,89 @@ function StockRecommendationsContent() {
     };
   }, [recommendations]);
 
+  // Export current filtered recommendations to CSV
+  const handleExportCSV = useCallback(() => {
+    if (!sortedRecommendations.length) return;
+
+    const headers = [
+      "Symbol",
+      "Name",
+      "Sector",
+      "Score",
+      "Action",
+      "Price",
+      "3D ROC %",
+      "5D RVOL",
+      "RS Rating",
+      "Stage 2",
+      "VCP Squeeze",
+      "Flow Rating",
+      "TP1",
+      "Stop Loss",
+      "R:R Ratio",
+      "Earnings Days Away",
+    ];
+
+    const escapeCSV = (val: any): string => {
+      if (val === null || val === undefined) return "";
+      const str = String(val);
+      if (str.includes(",") || str.includes('"') || str.includes("\n")) {
+        return `"${str.replace(/"/g, '""')}"`;
+      }
+      return str;
+    };
+
+    const rows = sortedRecommendations.map((stock) => {
+      const priceVal = stock.price > 0 ? stock.price : stock.trade_plan?.current_price ?? 0;
+      const rvolVal =
+        stock.short_term_rvol !== undefined
+          ? stock.short_term_rvol
+          : stock.volume_ratio !== undefined
+          ? stock.volume_ratio
+          : "";
+      const rsVal =
+        stock.relative_strength_score !== undefined
+          ? Math.round(stock.relative_strength_score)
+          : "";
+      const earningsAway =
+        stock.earnings_days_away !== null && stock.earnings_days_away !== undefined
+          ? stock.earnings_days_away
+          : "";
+
+      return [
+        escapeCSV(stock.symbol),
+        escapeCSV(stock.name),
+        escapeCSV(stock.sector),
+        escapeCSV(stock.score?.toFixed(1)),
+        escapeCSV(stock.action),
+        escapeCSV(priceVal ? priceVal.toFixed(2) : ""),
+        escapeCSV(stock.roc_3d !== undefined ? stock.roc_3d.toFixed(1) : ""),
+        escapeCSV(typeof rvolVal === "number" ? rvolVal.toFixed(2) : rvolVal),
+        escapeCSV(rsVal),
+        escapeCSV(stock.is_stage_2 ? "YES" : "NO"),
+        escapeCSV(stock.is_vcp_squeeze ? "YES" : "NO"),
+        escapeCSV(stock.accumulation_rating || ""),
+        escapeCSV(stock.trade_plan?.tp1 ? stock.trade_plan.tp1.toFixed(2) : ""),
+        escapeCSV(stock.trade_plan?.stop_loss ? stock.trade_plan.stop_loss.toFixed(2) : ""),
+        escapeCSV(stock.trade_plan?.risk_reward_ratio ? stock.trade_plan.risk_reward_ratio.toFixed(2) : ""),
+        escapeCSV(earningsAway),
+      ].join(",");
+    });
+
+    const csvContent = [headers.join(","), ...rows].join("\n");
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const dateStr = new Date().toISOString().split("T")[0];
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `stocks_screener_export_${dateStr}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast(`Exported ${sortedRecommendations.length} picks to CSV`);
+  }, [sortedRecommendations]);
+
   return (
     <div className="min-h-screen bg-[#070b14] text-slate-100 flex flex-col font-sans selection:bg-cyan-500/30 selection:text-cyan-200">
       {/* Top Market Ribbon */}
@@ -497,72 +626,118 @@ function StockRecommendationsContent() {
               })}
             </div>
 
-            {/* View Switcher: Card Grid vs Screener Table */}
-            <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-900 border border-slate-800">
+            {/* Right Header Actions: CSV Export + View Switcher */}
+            <div className="flex items-center gap-2">
+              {/* CSV Export Button */}
               <button
                 type="button"
-                onClick={() => setViewMode("grid")}
-                className={`p-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1 ${
-                  viewMode === "grid"
-                    ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
-                    : "text-slate-400 hover:text-slate-200"
-                }`}
-                title="Grid Card View"
+                onClick={handleExportCSV}
+                disabled={sortedRecommendations.length === 0}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-900 hover:bg-slate-800 border border-slate-700/80 hover:border-cyan-500/40 text-slate-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-sm"
+                title="Export current filtered recommendations to CSV"
               >
-                <LayoutGrid className="w-4 h-4" />
-                <span className="text-[11px] hidden sm:inline">Cards</span>
+                <Download className="w-3.5 h-3.5 text-cyan-400" />
+                <span className="hidden sm:inline">Export CSV</span>
               </button>
-              <button
-                type="button"
-                onClick={() => setViewMode("table")}
-                className={`p-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1 ${
-                  viewMode === "table"
-                    ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
-                    : "text-slate-400 hover:text-slate-200"
-                }`}
-                title="Pro Screener Table View"
-              >
-                <TableIcon className="w-4 h-4" />
-                <span className="text-[11px] hidden sm:inline">Screener Table</span>
-              </button>
+
+              {/* View Switcher: Card Grid vs Screener Table */}
+              <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-900 border border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setViewMode("grid")}
+                  className={`p-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1 ${
+                    viewMode === "grid"
+                      ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
+                      : "text-slate-400 hover:text-slate-200"
+                  }`}
+                  title="Grid Card View"
+                >
+                  <LayoutGrid className="w-4 h-4" />
+                  <span className="text-[11px] hidden sm:inline">Cards</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewMode("table")}
+                  className={`p-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1 ${
+                    viewMode === "table"
+                      ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
+                      : "text-slate-400 hover:text-slate-200"
+                  }`}
+                  title="Pro Screener Table View"
+                >
+                  <TableIcon className="w-4 h-4" />
+                  <span className="text-[11px] hidden sm:inline">Screener Table</span>
+                </button>
+              </div>
             </div>
           </div>
 
-          {/* Strategy Preset Filters */}
-          <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+          {/* Strategy Preset Chips Bar */}
+          <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 pt-1 border-t border-slate-800/50">
             <span className="text-[11px] font-semibold text-slate-400 mr-1 flex items-center gap-1">
               <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-              Strategy:
+              Presets:
+            </span>
+            {STRATEGY_PRESETS.map((preset) => {
+              const isActive = activePreset === preset.id;
+              return (
+                <button
+                  key={preset.id}
+                  type="button"
+                  onClick={() => {
+                    setActivePreset(preset.id);
+                    setActiveStrategy("ALL");
+                  }}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                    isActive
+                      ? preset.highlight === "amber"
+                        ? "bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-[0_0_12px_rgba(245,158,11,0.25)] font-bold"
+                        : preset.highlight === "purple"
+                        ? "bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-[0_0_12px_rgba(168,85,247,0.25)] font-bold"
+                        : preset.highlight === "emerald"
+                        ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-[0_0_12px_rgba(16,185,129,0.25)] font-bold"
+                        : "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-[0_0_12px_rgba(6,182,212,0.25)] font-bold"
+                      : "bg-slate-900/80 text-slate-400 hover:text-slate-200 hover:bg-slate-800/80 border border-slate-800"
+                  }`}
+                >
+                  {preset.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Secondary Technical Strategy Filters */}
+          <div className="flex flex-wrap items-center gap-1.5 text-xs">
+            <span className="text-[10px] uppercase font-semibold text-slate-500 mr-1 flex items-center gap-1">
+              <Activity className="w-3 h-3 text-slate-500" />
+              Technicals:
             </span>
             {[
-              { id: "ALL", label: "All Strategies" },
-              { id: "stage_2", label: "🔥 Stage 2 Leaders", highlight: "amber" },
-              { id: "vcp_squeeze", label: "⚡ VCP Squeeze", highlight: "purple" },
-              { id: "accumulation", label: "💎 Institutional Inflow", highlight: "emerald" },
-              { id: "rs_leaders", label: "⚡ RS Leaders (RS ≥ 75)", highlight: "cyan" },
-              { id: "breakouts", label: "🚀 52W Breakouts (< 5%)", highlight: "amber" },
-              { id: "golden_cross", label: "🌟 Golden Cross", highlight: "purple" },
-              { id: "pullback", label: "🎯 Pullback Dips", highlight: "emerald" },
-              { id: "velocity", label: "⚡ Velocity (3D ROC)", highlight: "cyan" },
-              { id: "rvol", label: "💥 RVOL Surges (> 1.35x)", highlight: "amber" },
-              { id: "ema_momentum", label: "🚀 8/21 EMA Expansion", highlight: "purple" },
+              { id: "ALL", label: "All Technicals" },
+              { id: "stage_2", label: "🔥 Stage 2" },
+              { id: "vcp_squeeze", label: "⚡ VCP" },
+              { id: "accumulation", label: "💎 Flow" },
+              { id: "rs_leaders", label: "⚡ RS ≥ 75" },
+              { id: "breakouts", label: "🚀 52W High" },
+              { id: "golden_cross", label: "🌟 Cross" },
+              { id: "pullback", label: "🎯 Dip" },
+              { id: "velocity", label: "⚡ Velocity" },
+              { id: "rvol", label: "💥 RVOL > 1.35x" },
+              { id: "ema_momentum", label: "🚀 8/21 EMA" },
             ].map((strat) => {
-              const isActive = activeStrategy === strat.id;
+              const isActive = activeStrategy === strat.id && activePreset === "ALL";
               return (
                 <button
                   key={strat.id}
                   type="button"
-                  onClick={() => setActiveStrategy(strat.id)}
-                  className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
+                  onClick={() => {
+                    setActiveStrategy(strat.id);
+                    setActivePreset("ALL");
+                  }}
+                  className={`px-2 py-0.5 rounded text-[11px] font-medium transition-all ${
                     isActive
-                      ? strat.highlight === "amber"
-                        ? "bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-[0_0_12px_rgba(245,158,11,0.25)] font-bold"
-                        : strat.highlight === "purple"
-                        ? "bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-[0_0_12px_rgba(168,85,247,0.25)] font-bold"
-                        : strat.highlight === "emerald"
-                        ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-[0_0_12px_rgba(16,185,129,0.25)] font-bold"
-                        : "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-[0_0_12px_rgba(6,182,212,0.25)] font-bold"
-                      : "bg-slate-900/60 text-slate-400 hover:text-slate-200 hover:bg-slate-800/80 border border-slate-800"
+                      ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-[0_0_8px_rgba(6,182,212,0.2)] font-bold"
+                      : "bg-slate-900/40 text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 border border-slate-800/60"
                   }`}
                 >
                   {strat.label}
@@ -571,15 +746,15 @@ function StockRecommendationsContent() {
             })}
           </div>
 
-          {/* Search, Sector, and Sort Controls Bar */}
+          {/* Search, Sector, Price Range, and Sort Controls Bar */}
           <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-800/60">
             <div className="flex flex-wrap items-center gap-3 flex-1 min-w-[280px]">
               {/* Search Bar */}
-              <div className="relative flex-1 min-w-[220px] max-w-md">
+              <div className="relative flex-1 min-w-[200px] max-w-sm">
                 <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
                 <input
                   type="text"
-                  placeholder="Search ticker or company (e.g., NVDA, Copper, CCJ)..."
+                  placeholder="Search ticker or company (e.g., NVDA, CCJ)..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   className="w-full rounded-xl bg-slate-900 border border-slate-700/80 pl-9 pr-8 py-2 text-xs text-slate-100 placeholder:text-slate-500 focus:border-cyan-500 focus:outline-none transition-colors"
@@ -605,6 +780,23 @@ function StockRecommendationsContent() {
                   {sectors.map((sec) => (
                     <option key={sec.key} value={sec.key}>
                       {sec.name} ({sec.count})
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="w-3.5 h-3.5 absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
+              </div>
+
+              {/* Price Range Dropdown Selector */}
+              <div className="relative">
+                <select
+                  value={priceRange}
+                  onChange={(e) => setPriceRange(e.target.value)}
+                  className="rounded-xl bg-slate-900 border border-slate-700/80 px-3 py-2 pr-8 text-xs font-medium text-slate-200 focus:border-cyan-500 focus:outline-none appearance-none cursor-pointer"
+                  title="Filter by stock price range"
+                >
+                  {PRICE_RANGE_OPTIONS.map((opt) => (
+                    <option key={opt.id} value={opt.id}>
+                      {opt.label}
                     </option>
                   ))}
                 </select>
@@ -744,6 +936,8 @@ function StockRecommendationsContent() {
                   onClick={() => {
                     setActiveHorizon("ALL");
                     setActiveStrategy("ALL");
+                    setActivePreset("ALL");
+                    setPriceRange("ALL");
                     setSelectedSector("ALL");
                     setSearchQuery("");
                   }}
@@ -814,7 +1008,7 @@ function StockRecommendationsContent() {
 
               <div className="flex items-center gap-2">
                 <Link
-                  href={`/?ticker=${encodeURIComponent(deepDiveStock.symbol)}`}
+                  href={`/?ticker=${encodeURIComponent(deepDiveStock.symbol)}&action=options`}
                   className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-cyan-500/30 text-xs font-semibold transition-colors inline-flex items-center gap-1.5"
                   title="View Options Chain"
                 >
@@ -1109,7 +1303,7 @@ function StockRecommendationsContent() {
           if (matched) openDeepDive(matched);
         }}
         onNavigateToOptions={(sym) => {
-          router.push(`/?ticker=${encodeURIComponent(sym)}`);
+          router.push(`/?ticker=${encodeURIComponent(sym)}&action=options`);
         }}
       />
 

@@ -15,6 +15,7 @@ import {
   Flame,
   Star,
   Compass,
+  Wallet,
 } from "lucide-react";
 
 export interface TradePlan {
@@ -65,6 +66,9 @@ export interface StockRecommendationItem {
   short_term_momentum_score?: number;
   short_term_setup?: string;
   is_short_term_breakout?: boolean;
+  earnings_days_away?: number | null;
+  is_earnings_imminent?: boolean;
+  is_earnings_blackout?: boolean;
 }
 
 interface StockCardProps {
@@ -186,6 +190,29 @@ export default function StockCard({
     );
   };
 
+  // Upcoming earnings warning countdown badge
+  const getEarningsBadge = (daysAway?: number | null) => {
+    if (daysAway === null || daysAway === undefined || daysAway < 0 || daysAway > 14) {
+      return null;
+    }
+    const isUrgent = daysAway <= 7;
+    const label = daysAway === 0 ? "Earnings Today" : `Earnings in ${daysAway}d`;
+
+    return (
+      <span
+        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono font-bold ${
+          isUrgent
+            ? "bg-rose-500/20 text-rose-300 border border-rose-500/40 shadow-[0_0_8px_rgba(244,63,94,0.3)] animate-pulse"
+            : "bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-[0_0_8px_rgba(245,158,11,0.2)]"
+        }`}
+        title={`Earnings report upcoming in ${daysAway} days. Watch for elevated IV.`}
+      >
+        <span className="text-[10px]">⚠️</span>
+        {label}
+      </span>
+    );
+  };
+
   // Format horizon badge
   const getHorizonBadge = (horizon: string) => {
     const h = (horizon || "SWING").toUpperCase();
@@ -299,6 +326,7 @@ export default function StockCard({
           </span>
           {getHorizonBadge(stock.horizon)}
           {getStrategyBadge(stock.strategy_tag)}
+          {getEarningsBadge(stock.earnings_days_away)}
           {stock.volume_ratio >= 1.25 && (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono font-medium bg-amber-500/15 text-amber-300 border border-amber-500/30">
               <Flame className="w-3 h-3 text-amber-400" />
@@ -534,7 +562,8 @@ export default function StockCard({
         <button
           type="button"
           onClick={() => onDeepDive(stock)}
-          className="flex-1 inline-flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg text-xs font-semibold bg-slate-800/80 hover:bg-slate-700/80 text-cyan-300 border border-cyan-500/30 hover:border-cyan-400/60 transition-all shadow-sm"
+          className="flex-1 inline-flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-lg text-xs font-semibold bg-slate-800/80 hover:bg-slate-700/80 text-cyan-300 border border-cyan-500/30 hover:border-cyan-400/60 transition-all shadow-sm"
+          title="Deep Dive Trade Plan & Chart"
         >
           <Target className="w-3.5 h-3.5 text-cyan-400" />
           Deep Dive
@@ -543,18 +572,20 @@ export default function StockCard({
         <button
           type="button"
           onClick={() => onPaperBuy(stock)}
-          className="flex-1 inline-flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg text-xs font-semibold bg-emerald-600/25 hover:bg-emerald-600/40 text-emerald-300 border border-emerald-500/40 hover:border-emerald-400 transition-all shadow-[0_0_12px_rgba(16,185,129,0.2)]"
+          className="flex-1 inline-flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-lg text-xs font-semibold bg-emerald-600/25 hover:bg-emerald-600/40 text-emerald-300 border border-emerald-500/40 hover:border-emerald-400 transition-all shadow-[0_0_12px_rgba(16,185,129,0.2)]"
+          title="Simulate paper buy for stock"
         >
-          <Zap className="w-3.5 h-3.5 text-emerald-400 fill-emerald-400/30" />
+          <Wallet className="w-3.5 h-3.5 text-emerald-400" />
           Paper Buy
         </button>
 
         <Link
-          href={`/?ticker=${encodeURIComponent(stock.symbol)}`}
-          className="p-2 rounded-lg bg-slate-800/50 hover:bg-slate-700/70 border border-slate-700/60 text-slate-400 hover:text-cyan-300 transition-colors"
-          title={`View Options for ${stock.symbol}`}
+          href={`/?ticker=${encodeURIComponent(stock.symbol)}&action=options`}
+          className="flex-1 inline-flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-lg text-xs font-semibold bg-cyan-600/20 hover:bg-cyan-600/35 text-cyan-300 border border-cyan-500/40 hover:border-cyan-400 transition-all shadow-[0_0_10px_rgba(6,182,212,0.15)]"
+          title={`Find Best Options for ${stock.symbol}`}
         >
-          <Layers className="w-3.5 h-3.5" />
+          <Zap className="w-3.5 h-3.5 text-cyan-400" />
+          Find Option
         </Link>
       </div>
     </div>
