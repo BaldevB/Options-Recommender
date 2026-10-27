@@ -125,7 +125,7 @@ export function getSpreadAlternative(rec: PayoffModalRec): SpreadData {
     breakeven: breakeven,
     rr_ratio: rr_ratio,
     width: width,
-    suggested_contracts: rec.suggested_contracts || 1,
+    suggested_contracts: rec.suggested_contracts ?? 0,
   };
 }
 
@@ -238,7 +238,7 @@ export default function OptionPayoffModal({
   const calculations = useMemo(() => {
     if (!rec) return null;
     const isCall = rec.option_type === "CALL";
-    const contracts = rec.suggested_contracts || 1;
+    const contracts = rec.suggested_contracts ?? 0;
     const spot = rec.stock_price;
 
     if (mode === "SPREAD" && spread) {
@@ -449,6 +449,10 @@ export default function OptionPayoffModal({
   // Handle Paper Buy within modal
   const handlePaperBuySubmit = () => {
     if (!rec || !calculations || !onPaperBuy) return;
+    if (calculations.contracts <= 0) {
+      alert("Cannot execute paper order: 0 contracts qualified (trade cost exceeds risk budget).");
+      return;
+    }
     if (mode === "SPREAD" && spread) {
       onPaperBuy({
         symbol: rec.symbol,
@@ -942,6 +946,17 @@ export default function OptionPayoffModal({
             </div>
           </div>
 
+          {/* Execution Reality & Theoretical Model Disclaimer */}
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-800 bg-[#070b14] px-4 py-2 text-[11px] text-slate-400">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-slate-300 font-bold">Execution Modeling:</span>
+              <span>Ask Entry: ${rec.ask.toFixed(2)} | Bid Exit: ${rec.bid.toFixed(2)} | Spread Friction: -${(rec.ask - rec.bid).toFixed(2)} (-{rec.ask > 0 ? (((rec.ask - rec.bid) / rec.ask) * 100).toFixed(1) : 0}%)</span>
+            </div>
+            <div className="text-amber-400/90 text-[10px] font-medium">
+              Midpoint fills not guaranteed. Broker fees/slippage excluded. Win POP is a Black-Scholes theoretical estimate.
+            </div>
+          </div>
+
           {/* ========================================================= */}
           {/* 6. TARGET MILESTONES TABLE                                */}
           {/* ========================================================= */}
@@ -1026,15 +1041,20 @@ export default function OptionPayoffModal({
               <button
                 type="button"
                 onClick={handlePaperBuySubmit}
+                disabled={calculations.contracts <= 0}
                 className={`flex items-center space-x-1.5 rounded-lg px-4 py-2 text-xs font-black shadow-md transition active:scale-95 ${
-                  boughtToast
+                  calculations.contracts <= 0
+                    ? "bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700"
+                    : boughtToast
                     ? "bg-emerald-400 text-slate-950"
                     : "bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-emerald-500/20"
                 }`}
               >
                 <Wallet className="h-4 w-4 text-slate-950" />
                 <span>
-                  {boughtToast
+                  {calculations.contracts <= 0
+                    ? "Exceeds Risk Budget (0x)"
+                    : boughtToast
                     ? "Added to Paper Portfolio!"
                     : `Paper Buy (${calculations.contracts}x @ $${calculations.costPerUnit.toFixed(2)})`}
                 </span>

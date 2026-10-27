@@ -206,6 +206,11 @@ export default function BestOptionsHome({
 
   const handlePaperBuyClick = (rec: OptionRecommendation, spread?: SpreadData | null) => {
     const isSpreadMode = (cardModes[rec.id] || "SINGLE") === "SPREAD";
+    const contracts = isSpreadMode ? (spread?.suggested_contracts ?? 0) : (rec.suggested_contracts ?? 0);
+    if (contracts <= 0) {
+      alert("Position exceeds capital risk budget (0 contracts qualified).");
+      return;
+    }
     if (isSpreadMode && spread) {
       onPaperBuy({
         symbol: rec.symbol,
@@ -218,7 +223,7 @@ export default function BestOptionsHome({
         net_debit: spread.net_debit,
         isSpread: true,
         spread_type: spread.spread_type,
-        suggested_contracts: spread.suggested_contracts || 1,
+        suggested_contracts: contracts,
         strategy_label: spread.spread_label,
         notes: `Defined-Risk Vertical Spread (${spread.spread_label}): Long $${spread.long_strike} / Short $${spread.short_strike}`,
       });
@@ -280,6 +285,31 @@ export default function BestOptionsHome({
   return (
     <div className="space-y-6">
       {/* ========================================================= */}
+      {/* 0. MARKET DATA QUALITY & EXECUTION REALITY HEADER         */}
+      {/* ========================================================= */}
+      <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-xl border border-slate-800 bg-[#070b14] px-4 py-2.5 text-[11px] text-slate-400">
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="flex items-center space-x-1.5">
+            <span className="h-2 w-2 rounded-full bg-emerald-400 inline-block animate-pulse" />
+            <strong className="text-slate-200">Data Source:</strong>
+            <span className="text-slate-300">yfinance (~15m delay standard feeds)</span>
+          </span>
+          <span className="text-slate-700">|</span>
+          <span>
+            <strong className="text-slate-200">Retrieval:</strong> {marketRegime?.updated_at || "Recent UTC"}
+          </span>
+          <span className="text-slate-700">|</span>
+          <span>
+            <strong className="text-slate-200">Bid/Ask Size:</strong> <span className="text-amber-400/90 font-mono">unavailable</span>
+          </span>
+        </div>
+        <div className="flex items-center space-x-1 text-slate-400 text-[10px]">
+          <Info className="h-3.5 w-3.5 text-cyan-400 shrink-0" />
+          <span>Fills modeled at Ask (entry) & Bid (exit). Midpoint not guaranteed. Broker fees excluded.</span>
+        </div>
+      </div>
+
+      {/* ========================================================= */}
       {/* 1. HERO BANNER: MARKET REGIME & RECOMMENDATIONS COCKPIT   */}
       {/* ========================================================= */}
       <div className="relative overflow-hidden rounded-2xl border border-cyan-500/30 bg-gradient-to-br from-[#0c162c] via-[#091020] to-[#060a14] p-6 shadow-2xl">
@@ -338,7 +368,7 @@ export default function BestOptionsHome({
                 <Percent className="h-4 w-4" />
               </div>
               <div>
-                <div className="text-[11px] font-medium text-slate-400">Avg Win POP %</div>
+                <div className="text-[11px] font-medium text-slate-400">Model PoP (BS Est.)</div>
                 <div className="text-lg font-bold text-emerald-400">{summaryMetrics.avgPop}%</div>
               </div>
             </div>
@@ -677,10 +707,13 @@ export default function BestOptionsHome({
 
                         <div className="text-right">
                           <div className="text-base font-black text-emerald-400">
-                            ${rec.ask.toFixed(2)}
+                            ${rec.ask.toFixed(2)} <span className="text-[10px] text-slate-400 font-normal">Ask</span>
                           </div>
-                          <div className="text-[10px] text-slate-500">
-                            Bid: ${rec.bid.toFixed(2)}
+                          <div className="text-[10px] text-slate-400 font-mono">
+                            Bid: ${rec.bid.toFixed(2)} | Mid: ${((rec.ask + rec.bid) / 2).toFixed(2)}
+                          </div>
+                          <div className="text-[9px] text-amber-400/90 font-mono">
+                            Spread: ${(rec.ask - rec.bid).toFixed(2)} ({rec.ask > 0 ? (((rec.ask - rec.bid) / rec.ask) * 100).toFixed(1) : 0}%)
                           </div>
                         </div>
                       </div>
@@ -845,8 +878,8 @@ export default function BestOptionsHome({
 
                   {/* Win Probability & Risk/Reward */}
                   <div className="mb-3 flex items-center justify-between rounded-lg bg-[#0e1628] px-3 py-2 text-xs">
-                    <div className="flex items-center space-x-1.5">
-                      <span className="text-[11px] text-slate-400">Win POP:</span>
+                    <div className="flex items-center space-x-1.5" title="Theoretical Black-Scholes estimate, not proven historical win rate">
+                      <span className="text-[11px] text-slate-400">Model PoP:</span>
                       <span className="font-bold text-emerald-400 font-mono">{rec.pop_pct.toFixed(1)}%</span>
                     </div>
                     <div className="flex items-center space-x-1.5">
@@ -865,14 +898,29 @@ export default function BestOptionsHome({
                     </div>
                   </div>
 
-                  {/* 2 Rationale Bullets */}
+                  {/* Zero-Contract Risk Safeguard Notice */}
+                  {rec.suggested_contracts === 0 && (
+                    <div className="mb-3 rounded-lg border border-rose-500/40 bg-rose-950/30 p-2 text-[10px] text-rose-300">
+                      <span className="font-bold">⚠️ Exceeds Risk Budget:</span> Contract premium exceeds max risk budget for this account. 0 contracts qualified (paper execution blocked).
+                    </div>
+                  )}
+
+                  {/* Why this contract? Rationale & Screening Breakdown */}
                   <div className="mb-4 space-y-1.5">
+                    <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-slate-400 border-b border-slate-800/60 pb-1">
+                      <span>Why This Setup Passed:</span>
+                      <span className="font-mono text-cyan-300">Vol: {rec.volume.toLocaleString()} | OI: {rec.open_interest.toLocaleString()}</span>
+                    </div>
                     {rec.rationale.slice(0, 2).map((r, idx) => (
                       <div key={idx} className="flex items-start space-x-1.5 text-[11px] text-slate-300 leading-snug">
                         <CheckCircle2 className="h-3 w-3 text-cyan-400 shrink-0 mt-0.5" />
                         <span>{r}</span>
                       </div>
                     ))}
+                    <div className="flex items-center justify-between text-[10px] font-mono text-slate-400 pt-1">
+                      <span>Invalidation: Stop ${rec.stop_loss_price.toFixed(2)} (-{rec.stop_loss_loss_pct.toFixed(0)}%)</span>
+                      <span>Max Loss: ${rec.suggested_contracts > 0 ? (rec.ask * 100 * rec.suggested_contracts).toFixed(0) : "0"}</span>
+                    </div>
                   </div>
                 </div>
 
@@ -881,15 +929,20 @@ export default function BestOptionsHome({
                   <button
                     type="button"
                     onClick={() => handlePaperBuyClick(rec, spread)}
+                    disabled={(currentMode === "SPREAD" ? (spread.suggested_contracts ?? 0) : rec.suggested_contracts) <= 0}
                     className={`flex-1 flex items-center justify-center space-x-1.5 rounded-lg py-2 px-3 text-xs font-black transition active:scale-95 shadow-md ${
-                      isBought
+                      (currentMode === "SPREAD" ? (spread.suggested_contracts ?? 0) : rec.suggested_contracts) <= 0
+                        ? "bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700"
+                        : isBought
                         ? "bg-emerald-400 text-slate-950"
                         : "bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-emerald-500/20"
                     }`}
                   >
                     <Wallet className="h-3.5 w-3.5 text-slate-950" />
                     <span>
-                      {isBought
+                      {(currentMode === "SPREAD" ? (spread.suggested_contracts ?? 0) : rec.suggested_contracts) <= 0
+                        ? "Exceeds Risk Budget (0x)"
+                        : isBought
                         ? "Filled in Paper!"
                         : currentMode === "SPREAD"
                         ? `Paper Spread (${spread.suggested_contracts}x)`
@@ -949,7 +1002,7 @@ export default function BestOptionsHome({
                   <th className="px-3 py-3 text-center">Delta (Δ)</th>
                   <th className="px-3 py-3 text-center">IV %</th>
                   <th className="px-3 py-3 text-center">DTE</th>
-                  <th className="px-3 py-3 text-center">Win POP</th>
+                  <th className="px-3 py-3 text-center">Model PoP (BS Est.)</th>
                   <th className="px-3 py-3 text-center">R:R</th>
                   <th className="px-3 py-3 text-right">TP1 Target</th>
                   <th className="px-4 py-3 text-center">Actions</th>
@@ -1048,13 +1101,16 @@ export default function BestOptionsHome({
                           <button
                             type="button"
                             onClick={() => handlePaperBuyClick(rec)}
+                            disabled={rec.suggested_contracts <= 0}
                             className={`rounded-lg px-2.5 py-1 text-[11px] font-black transition active:scale-95 ${
-                              isBought
+                              rec.suggested_contracts <= 0
+                                ? "bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700"
+                                : isBought
                                 ? "bg-emerald-400 text-slate-950"
                                 : "bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-sm"
                             }`}
                           >
-                            {isBought ? "Filled" : `Buy ${rec.suggested_contracts}x`}
+                            {rec.suggested_contracts <= 0 ? "0x (Budget)" : isBought ? "Filled" : `Buy ${rec.suggested_contracts}x`}
                           </button>
                           <button
                             type="button"

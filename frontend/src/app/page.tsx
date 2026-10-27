@@ -203,7 +203,12 @@ export default function Home() {
     try {
       const savedBalanceStr = localStorage.getItem("options_paper_balance");
       const balance = savedBalanceStr ? parseFloat(savedBalanceStr) : 10000;
-      const qty = Math.max(1, customContracts ?? opt.suggested_contracts ?? opt.contracts ?? 1);
+      const contractsCandidate = customContracts ?? opt.suggested_contracts ?? opt.contracts ?? 0;
+      if (contractsCandidate <= 0) {
+        alert("Cannot execute paper order: 0 contracts qualified (trade exceeds risk budget).");
+        return;
+      }
+      const qty = contractsCandidate;
       const askPx = opt.net_debit ?? opt.ask ?? opt.price ?? 1;
       const cost = askPx * 100 * qty;
       if (cost > balance) {
