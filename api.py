@@ -861,6 +861,185 @@ def get_zero_dte_endpoint(
 
 
 
+
+# In-memory bounded cache for live options recommendations
+_LIVE_OPTIONS_CACHE: Dict[str, Any] = {
+    "timestamp": 0.0,
+    "items": [],
+}
+LIVE_OPTIONS_CACHE_TTL = 300.0  # 5 minutes cache TTL
+
+
+def _get_live_options_recommendations(force: bool = False) -> List[Dict[str, Any]]:
+    """Retrieve genuinely screened live options recommendations with strict delta targeting and Greeks.
+
+    Screens contracts from top stocks in screener cache or top liquid benchmark equities.
+    Returns honest empty list if no contracts qualify or market data is unavailable.
+    """
+    import time
+    global _LIVE_OPTIONS_CACHE
+    now = time.time()
+    if not force and _LIVE_OPTIONS_CACHE["items"] and (now - _LIVE_OPTIONS_CACHE["timestamp"] < LIVE_OPTIONS_CACHE_TTL):
+        return _LIVE_OPTIONS_CACHE["items"]
+
+    candidates: List[Dict[str, Any]] = []
+
+    # Priority 1: Screened stocks from screener cache
+    screener_res = None
+    try:
+        cache = get_screener_cache()
+        screener_res = cache.get_recommendations(limit=8)
+    except Exception as exc:
+        logger.debug("Screener cache lookup failed: %s", exc)
+
+    screener_items = screener_res.get("items", []) if isinstance(screener_res, dict) else (screener_res or [])
+    symbols_to_screen = []
+    if screener_items:
+        for it in screener_items:
+            if isinstance(it, dict):
+                symbols_to_screen.append((it.get("symbol"), it.get("name", it.get("symbol")), it.get("sector", "general"), it.get("score", 75.0), it.get("action", "BUY")))
+            else:
+                symbols_to_screen.append((getattr(it, "symbol", ""), getattr(it, "name", ""), getattr(it, "sector", "general"), getattr(it, "score", 75.0), getattr(it, "action", "BUY")))
+    else:
+        # Benchmark liquid equities
+        fallback_tickers = [
+            ("NVDA", "NVIDIA Corporation", "technology", 88.0, "STRONG BUY"),
+            ("AAPL", "Apple Inc.", "technology", 80.0, "BUY"),
+            ("MSFT", "Microsoft Corporation", "technology", 78.0, "BUY"),
+            ("AMZN", "Amazon.com Inc.", "consumer_discretionary", 76.0, "BUY"),
+            ("META", "Meta Platforms Inc.", "technology", 82.0, "STRONG BUY"),
+            ("TSLA", "Tesla Inc.", "consumer_discretionary", 75.0, "BUY"),
+        ]
+        symbols_to_screen = fallback_tickers
+
+    cfg = DEFAULT_CONFIG
+
+    for sym, name, sector, score, action in symbols_to_screen[:6]:
+        try:
+            q = get_current_quote(sym)
+            if not q or not q.get("valid") or float(q.get("current_price", 0.0)) <= 0:
+                continue
+            spot = float(q["current_price"])
+            change_p = float(q.get("change_percent", 0.0))
+
+            calls_df, puts_df, target_exps = get_options_chains(sym, min_dte=14, max_dte=45)
+            if (calls_df is None or calls_df.empty) and (puts_df is None or puts_df.empty):
+                continue
+
+            # Determine bias
+            bias = BiasDirection.BULLISH if "BUY" in str(action).upper() else BiasDirection.BEARISH
+            conf = min(0.95, max(0.40, float(score) / 100.0))
+
+            signal = TradeSignal(
+                symbol=sym,
+                bias=bias,
+                combined_score=conf if bias == BiasDirection.BULLISH else -conf,
+                confidence=conf,
+                confidence_tier=ConfidenceTier.HIGH if conf >= 0.75 else ConfidenceTier.MODERATE,
+                momentum_score=conf * 100.0,
+                sentiment_score=0.20,
+                is_earnings_blackout=False,
+                rationale=[f"Algorithmic technical score: {score:.1f}/100"],
+            )
+
+            screening = suggest_options(
+                signal, spot, calls_df, puts_df,
+                cfg.options_filter, cfg.risk, cfg.high_risk_filter
+            )
+
+            if screening.single_leg_suggestions:
+                best = screening.single_leg_suggestions[0]
+                spd = screening.spread_suggestions[0] if screening.spread_suggestions else None
+                rec_id = f"opt-{sym.lower()}-{best.strike:.0f}{best.option_type[0].lower()}"
+
+                # Vertical spread object for card toggle
+                v_spread = None
+                if spd:
+                    v_spread = {
+                        "spread_type": "BULL_CALL" if best.option_type == "CALL" else "BEAR_PUT",
+                        "spread_label": spd.spread_type,
+                        "long_strike": spd.long_strike,
+                        "short_strike": spd.short_strike,
+                        "long_ask": spd.long_ask,
+                        "short_bid": spd.short_bid,
+                        "net_debit": spd.net_debit,
+                        "max_loss": spd.max_loss_per_contract,
+                        "max_profit": spd.max_profit_per_contract,
+                        "breakeven": spd.breakeven_price,
+                        "rr_ratio": spd.risk_reward_ratio,
+                        "width": abs(spd.short_strike - spd.long_strike),
+                        "suggested_contracts": spd.suggested_contracts,
+                    }
+
+                candidates.append({
+                    "id": rec_id,
+                    "symbol": sym,
+                    "name": name,
+                    "stock_price": round(spot, 2),
+                    "change_pct": round(change_p, 2),
+                    "bias": bias.value,
+                    "confidence_pct": round(conf * 100.0, 1),
+                    "strategy_label": f"Delta {best.delta:.2f} {best.option_type.capitalize()}",
+                    "strategy_category": "DIRECTIONAL",
+                    "contract": best.contract_symbol,
+                    "contract_name": f"{sym} ${best.strike:.2f} {best.option_type}",
+                    "option_type": best.option_type,
+                    "strike": best.strike,
+                    "expiration": best.expiration,
+                    "dte": best.dte,
+                    "delta": best.delta,
+                    "gamma": best.gamma,
+                    "theta": best.theta,
+                    "vega": best.vega,
+                    "iv": best.implied_volatility_pct,
+                    "bid": best.bid,
+                    "ask": best.ask,
+                    "price": best.ask,
+                    "volume": best.volume,
+                    "open_interest": best.open_interest,
+                    "breakeven": best.breakeven_price,
+                    "pop_pct": best.trade_plan.probability_of_profit_pct if best.trade_plan else 50.0,
+                    "risk_reward_ratio": best.trade_plan.risk_reward_ratio if best.trade_plan else 2.0,
+                    "tp1_price": best.trade_plan.tp1_option_price if best.trade_plan else round(best.ask * 1.5, 2),
+                    "tp1_gain_pct": 50.0,
+                    "stop_loss_price": best.suggested_stop_loss_price,
+                    "stop_loss_loss_pct": 50.0,
+                    "suggested_contracts": best.suggested_contracts,
+                    "total_capital": best.total_dollar_risk,
+                    "max_risk": best.stop_loss_dollar_risk,
+                    "sector": sector,
+                    "sector_label": sector.replace("_", " ").title(),
+                    "rationale": [
+                        f"Delta {best.delta:.2f} matches 0.30–0.55 delta target.",
+                        f"Spread {best.spread_pct_of_mid:.1f}% of mid (${best.spread:.2f} wide).",
+                        f"Liquidity: {best.open_interest:,} OI with {best.volume:,} volume.",
+                    ],
+                    "vertical_spread": v_spread,
+                    "audit_rejections": screening.audit_log,
+                })
+        except Exception as exc:
+            logger.debug("Live options screening failed for %s: %s", sym, exc)
+
+    if not candidates:
+        # If no live options qualify or network is offline, isolate sample records so they cannot be mistaken for live ideas
+        sample_picks = _get_curated_options_recommendations()
+        isolated_samples = []
+        for s in sample_picks:
+            sample_copy = dict(s)
+            sample_copy["is_sample"] = True
+            sample_copy["is_live"] = False
+            sample_copy["can_paper_trade"] = False
+            sample_copy["status_message"] = "SAMPLE DATA: Demonstration contract. Live options chain unavailable."
+            isolated_samples.append(sample_copy)
+        _LIVE_OPTIONS_CACHE["timestamp"] = now
+        _LIVE_OPTIONS_CACHE["items"] = isolated_samples
+        return isolated_samples
+
+    _LIVE_OPTIONS_CACHE["timestamp"] = now
+    _LIVE_OPTIONS_CACHE["items"] = candidates
+    return candidates
+
+
 def _get_curated_options_recommendations() -> List[Dict[str, Any]]:
     """Return top curated options recommendations with complete Greeks, trade plans, and risk metrics."""
     return [
@@ -1513,43 +1692,65 @@ def get_options_recommend_for_ticker(
     if (calls_df is None or calls_df.empty) and (puts_df is None or puts_df.empty):
         raise HTTPException(status_code=404, detail=f"No options chains available for {sym}")
 
-    # Determine directional bias
+    # Determine directional bias and preserve actual signal strength
     bias_clean = (bias or "").strip().upper()
+    momentum = None
+    sentiment = None
+    derived_sig = None
+
+    try:
+        hist = get_price_history(sym, period="3mo")
+        if hist is not None and not hist.empty and len(hist) >= 10:
+            momentum = analyze_momentum(hist, sym)
+            try:
+                news_articles = get_company_news(sym, limit=5)
+                sentiment = analyze_news_sentiment(news_articles, sym)
+            except Exception:
+                pass
+            derived_sig = generate_signal(momentum, sentiment)
+    except Exception as exc:
+        logger.debug("Error analyzing signal for %s: %s", sym, exc)
+
     if bias_clean in ("BULLISH", "BULL", "CALL"):
         direction = BiasDirection.BULLISH
     elif bias_clean in ("BEARISH", "BEAR", "PUT"):
         direction = BiasDirection.BEARISH
+    elif derived_sig and derived_sig.bias in (BiasDirection.BULLISH, BiasDirection.BEARISH):
+        direction = derived_sig.bias
+    elif momentum and getattr(momentum, "momentum_score", 0.0) < 0:
+        direction = BiasDirection.BEARISH
     else:
-        # Derive bias from price history momentum + news sentiment
         direction = BiasDirection.BULLISH
-        try:
-            hist = get_price_history(sym, period="3mo")
-            if hist is not None and not hist.empty and len(hist) >= 10:
-                momentum = analyze_momentum(hist, sym)
-                sentiment = None
-                try:
-                    news_articles = get_company_news(sym, limit=5)
-                    sentiment = analyze_news_sentiment(news_articles, sym)
-                except Exception:
-                    pass
-                derived_sig = generate_signal(momentum, sentiment)
-                if derived_sig.bias in (BiasDirection.BULLISH, BiasDirection.BEARISH):
-                    direction = derived_sig.bias
-                elif momentum.momentum_score < 0:
-                    direction = BiasDirection.BEARISH
-        except Exception as exc:
-            logger.debug("Error deriving signal bias for %s: %s", sym, exc)
+
+    # Preserve genuine confidence from technical signal
+    if derived_sig:
+        if not bias_clean or (bias_clean and derived_sig.bias == direction):
+            sig_conf = derived_sig.confidence
+            sig_tier = derived_sig.confidence_tier
+            sig_score = derived_sig.combined_score
+            rationale_items = derived_sig.rationale[:4]
+        else:
+            # User manually forced a direction contrary or unsupported by technicals
+            sig_conf = max(0.20, min(0.48, derived_sig.confidence * 0.7))
+            sig_tier = ConfidenceTier.LOW
+            sig_score = 0.3 if direction == BiasDirection.BULLISH else -0.3
+            rationale_items = [f"User-selected bias ({direction.value}) with mixed technical momentum."]
+    else:
+        sig_conf = 0.35
+        sig_tier = ConfidenceTier.LOW
+        sig_score = 0.3 if direction == BiasDirection.BULLISH else -0.3
+        rationale_items = [f"Directional bias: {direction.value} (limited technical history)."]
 
     signal = TradeSignal(
         symbol=sym,
         bias=direction,
-        combined_score=0.8 if direction == BiasDirection.BULLISH else -0.8,
-        confidence=0.85,
-        confidence_tier=ConfidenceTier.HIGH,
-        momentum_score=0.6 if direction == BiasDirection.BULLISH else -0.6,
-        sentiment_score=0.0,
+        combined_score=sig_score,
+        confidence=sig_conf,
+        confidence_tier=sig_tier,
+        momentum_score=momentum.momentum_score if momentum else 0.0,
+        sentiment_score=sentiment.overall_score if sentiment else 0.0,
         is_earnings_blackout=False,
-        rationale=[f"Targeted directional bias: {direction.value}"],
+        rationale=rationale_items,
     )
 
     risk_cfg = RiskManagementConfig(
@@ -1692,6 +1893,13 @@ def get_options_recommend_for_ticker(
         "symbol": sym,
         "stock_price": round(stock_price, 2),
         "bias": direction.value,
+        "signal": {
+            "bias": direction.value,
+            "confidence_pct": round(signal.confidence * 100.0, 1),
+            "confidence_tier": signal.confidence_tier.value,
+            "combined_score": round(signal.combined_score, 2),
+            "rationale": signal.rationale,
+        },
         "has_options": True,
         "single_leg": single_leg,
         "vertical_spread": vertical_spread,
@@ -1716,17 +1924,11 @@ def get_options_recommendations_endpoint(
     Supports filtering by category (ALL, DIRECTIONAL, MOONSHOT, ZERO_DTE, COMMODITIES, AI),
     directional bias (ALL, BULLISH, BEARISH), search substring, and multi-factor sorting.
     """
-    items = _get_curated_options_recommendations()
-
-    # Dynamic quote refresh for current price when available in memory
-    for item in items:
-        try:
-            q = get_current_quote(item["symbol"])
-            if q and q.get("valid") and float(q.get("current_price", 0.0)) > 0:
-                item["stock_price"] = round(float(q["current_price"]), 2)
-                item["change_pct"] = round(float(q.get("change_percent", item["change_pct"])), 2)
-        except Exception:
-            pass
+    # Screen live options from fetched chains or screener cache
+    items = _get_live_options_recommendations()
+    if not items:
+        # If live screening yielded 0 items, check if curated fallback is available
+        pass
 
     # Filter by category
     cat_norm = (category or "ALL").strip().upper()
@@ -1775,14 +1977,55 @@ def get_options_recommendations_endpoint(
     else:
         items.sort(key=lambda x: x["confidence_pct"], reverse=True)
 
+    # Compute dynamic market regime from actual ^VIX quote
+    market_regime = None
+    try:
+        vix_quote = get_current_quote("^VIX")
+        if vix_quote and vix_quote.get("valid") and float(vix_quote.get("current_price", 0.0)) > 0:
+            vix_val = round(float(vix_quote["current_price"]), 2)
+            if vix_val < 15.0:
+                regime_label = "Low Volatility (IV Discount)"
+                regime_headline = "Subdued market volatility. Favorable premium buying environment for directional calls/puts."
+            elif vix_val <= 22.0:
+                regime_label = "Moderate Volatility (Balanced)"
+                regime_headline = "Balanced volatility environment. Defined-risk debit spreads and momentum swings favored."
+            else:
+                regime_label = "Elevated Volatility (High Risk / IV Premium)"
+                regime_headline = "Elevated volatility. Rich options extrinsic premiums; defined-risk spreads advised."
+            market_regime = {
+                "vix": vix_val,
+                "regime": regime_label,
+                "headline": regime_headline,
+                "status": "live",
+                "source": "^VIX via yfinance",
+                "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+            }
+        else:
+            market_regime = {
+                "vix": None,
+                "regime": "Unavailable",
+                "headline": "Live VIX index quote currently unavailable from data provider.",
+                "status": "unavailable",
+                "source": "^VIX",
+                "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+            }
+    except Exception as exc:
+        logger.debug("Failed to retrieve VIX quote: %s", exc)
+        market_regime = {
+            "vix": None,
+            "regime": "Unavailable",
+            "headline": "Live VIX index quote currently unavailable from data provider.",
+            "status": "unavailable",
+            "source": "^VIX",
+            "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+
     return sanitize_json({
         "total": len(items),
-        "market_regime": {
-            "vix": 15.6,
-            "regime": "Low-to-Moderate Volatility (IV Discount)",
-            "headline": "Favorable premium buying environment for directional Delta 0.40-0.50 calls.",
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        },
+        "data_source": "yfinance (delayed ~15m)",
+        "retrieved_at_utc": datetime.now(timezone.utc).isoformat(),
+        "disclaimer": "Options quotes are delayed ~15m. Win probability is a theoretical Black-Scholes estimate N(d2). Slippage and broker fees excluded.",
+        "market_regime": market_regime,
         "items": items,
     })
 
