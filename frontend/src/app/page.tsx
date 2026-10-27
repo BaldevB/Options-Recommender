@@ -747,18 +747,19 @@ export default function Home() {
         <div className="mx-auto flex max-w-7xl items-center justify-between overflow-x-auto text-xs">
           <div className="flex items-center space-x-2">
             <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
-              Quick Leaders:
+              Best Companies:
             </span>
             {[
-              "NVDA", "MSTR", "PLTR", "COIN", "ASTS", "GLD", "SLV", "USO",
-              "FCX", "CCJ", "NBIS", "CORZ", "COHR", "MU", "IONQ", "AMD",
-              "AVGO", "MSFT", "TSM", "SPY", "QQQ"
+              "AAPL", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "TSLA",
+              "BRK-B", "LLY", "AVGO", "JPM", "V", "TSM", "WMT", "COST",
+              "NFLX", "AMD", "SPY", "QQQ"
             ].map(
               (sym) => (
                 <button
                   key={sym}
                   onClick={() => {
                     setSearchInput(sym);
+                    setTicker(sym);
                     fetchAnalysis(sym);
                   }}
                   className={`rounded-md px-2.5 py-1 text-xs font-semibold transition ${
