@@ -1440,6 +1440,16 @@ def calculate_chain_analytics(
     puts_df: pd.DataFrame
 ) -> Dict[str, Any]:
     """Calculate Max Pain, Expected Move, Put-Call Ratios, and Open Interest breakdown."""
+    if spot <= 0:
+        all_s = []
+        if calls_df is not None and not calls_df.empty and "strike" in calls_df.columns:
+            all_s.extend(calls_df["strike"].dropna().tolist())
+        if puts_df is not None and not puts_df.empty and "strike" in puts_df.columns:
+            all_s.extend(puts_df["strike"].dropna().tolist())
+        if all_s:
+            import pandas as pd
+            spot = float(pd.Series(all_s).median())
+
     if calls_df is None or puts_df is None or calls_df.empty or puts_df.empty:
         return {
             "expected_move": 0.0,
@@ -1557,7 +1567,16 @@ def build_chain_matrix(
 ) -> List[Dict[str, Any]]:
     """Build unified Call / Put strike ladder with complete Black-Scholes Greeks."""
     if spot <= 0:
-        return []
+        all_s = []
+        if calls_df is not None and not calls_df.empty and "strike" in calls_df.columns:
+            all_s.extend(calls_df["strike"].dropna().tolist())
+        if puts_df is not None and not puts_df.empty and "strike" in puts_df.columns:
+            all_s.extend(puts_df["strike"].dropna().tolist())
+        if all_s:
+            import pandas as pd
+            spot = float(pd.Series(all_s).median())
+        else:
+            return []
 
     calls_by_strike = {float(r["strike"]): r for _, r in calls_df.iterrows()} if calls_df is not None and not calls_df.empty else {}
     puts_by_strike = {float(r["strike"]): r for _, r in puts_df.iterrows()} if puts_df is not None and not puts_df.empty else {}

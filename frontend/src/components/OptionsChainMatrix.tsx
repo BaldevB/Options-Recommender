@@ -4,6 +4,7 @@ import React, { useState, useEffect, useMemo } from "react";
 import dynamic from "next/dynamic";
 import {
   RefreshCw,
+  AlertCircle,
   Search,
   Crosshair,
   TrendingUp,
@@ -56,12 +57,14 @@ export default function OptionsChainMatrix({
       const res = await fetch(url);
       if (!res.ok) throw new Error(`Failed to load options chain for ${ticker}`);
       const json = await res.json();
-      if (json.error && (!json.strikes || json.strikes.length === 0)) {
-        throw new Error(json.error);
-      }
+      // Always retain returned data (name, spot price, expirations list)
       setData(json);
       if (json.selected_expiration) {
         setSelectedExp(json.selected_expiration);
+      }
+      if (json.error && (!json.strikes || json.strikes.length === 0)) {
+        setError(json.error);
+        return;
       }
 
       // Default inspected option to ATM Call if none selected or ticker changed
@@ -99,15 +102,17 @@ export default function OptionsChainMatrix({
 
   // Filter strikes based on user selection
   const filteredStrikes = useMemo(() => {
-    if (!data?.strikes) return [];
+    if (!data?.strikes || data.strikes.length === 0) return [];
     let list = [...data.strikes];
 
-    // Search filter
+    // Search filter: direct search across strikes
     if (strikeSearch.trim()) {
-      const q = parseFloat(strikeSearch.trim());
-      if (!isNaN(q)) {
-        list = list.filter((s) => Math.abs(s.strike - q) < 10);
-      }
+      const term = strikeSearch.trim();
+      const num = parseFloat(term);
+      return list.filter((s) => {
+        if (!isNaN(num) && Math.abs(s.strike - num) <= 15) return true;
+        return s.strike.toString().includes(term);
+      });
     }
 
     const atmIndex = list.findIndex((s) => s.is_atm);
@@ -118,14 +123,19 @@ export default function OptionsChainMatrix({
       const end = Math.min(list.length, validAtmIndex + 11);
       return list.slice(start, end);
     } else if (strikeRange === "itm") {
-      // Calls ITM or Puts ITM
-      return list.filter((s) => s.is_itm_call || s.is_itm_put);
+      const isPut = inspectedOption?.type === "PUT";
+      return isPut
+        ? list.filter((s) => s.is_itm_put || s.is_atm)
+        : list.filter((s) => s.is_itm_call || s.is_atm);
     } else if (strikeRange === "otm") {
-      return list.filter((s) => !s.is_itm_call || !s.is_itm_put);
+      const isPut = inspectedOption?.type === "PUT";
+      return isPut
+        ? list.filter((s) => !s.is_itm_put || s.is_atm)
+        : list.filter((s) => !s.is_itm_call || s.is_atm);
     }
 
     return list;
-  }, [data?.strikes, strikeRange, strikeSearch]);
+  }, [data?.strikes, strikeRange, strikeSearch, inspectedOption?.type]);
 
   const analytics = data?.analytics || {};
   const spotPrice = data?.current_price || 0;
@@ -309,7 +319,7 @@ useEffect(() => {
             </span>
           </div>
           <div className="mt-1 text-[11px] text-slate-400 font-mono">
-            Range: ${analytics.expected_range_low?.toFixed(2)} &ndash; ${analytics.expected_range_high?.toFixed(2)}
+            Range: ${analytics.expected_range_low != null ? analytics.expected_range_low.toFixed(2) : spotPrice.toFixed(2)} &ndash; ${analytics.expected_range_high != null ? analytics.expected_range_high.toFixed(2) : spotPrice.toFixed(2)}
           </div>
         </div>
 
@@ -439,12 +449,49 @@ useEffect(() => {
             </div>
           </div>
         ) : error ? (
-          <div className="p-12 text-center text-sm text-rose-400">
-            {error}
+          <div className="flex flex-col items-center justify-center p-12 text-center">
+            <div className="rounded-full bg-rose-500/10 p-3 text-rose-400 mb-3 border border-rose-500/20">
+              <AlertCircle className="h-6 w-6" />
+            </div>
+            <h4 className="text-base font-bold text-white mb-1">Options Chain Unavailable</h4>
+            <p className="text-sm text-rose-300 max-w-md mb-4">{error}</p>
+            <div className="flex flex-wrap items-center justify-center gap-3">
+              <button
+                onClick={() => fetchChain(selectedExp)}
+                disabled={loading}
+                className="flex items-center space-x-2 rounded-lg bg-cyan-500 px-4 py-2 text-xs font-bold text-slate-950 shadow-lg shadow-cyan-500/20 hover:bg-cyan-400 transition"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+                <span>Retry Fetching Chain</span>
+              </button>
+              {data?.available_expirations && data.available_expirations.length > 1 && (
+                <div className="flex items-center space-x-1.5 text-xs text-slate-400">
+                  <span>or try:</span>
+                  {data.available_expirations.slice(0, 3).map((expItem: any) => (
+                    <button
+                      key={expItem.expiration}
+                      onClick={() => handleExpirationChange(expItem.expiration)}
+                      className="rounded bg-slate-800 px-2 py-1 text-xs text-cyan-300 hover:bg-slate-700 font-mono"
+                    >
+                      {expItem.expiration}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         ) : filteredStrikes.length === 0 ? (
-          <div className="p-12 text-center text-sm text-slate-400">
-            No strikes matching your filter.
+          <div className="flex flex-col items-center justify-center p-12 text-center">
+            <p className="text-sm text-slate-400 mb-3">No strikes matching your current filter.</p>
+            <button
+              onClick={() => {
+                setStrikeSearch("");
+                setStrikeRange("all");
+              }}
+              className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-cyan-300 hover:bg-slate-700 transition"
+            >
+              Reset Filters (Show All Strikes)
+            </button>
           </div>
         ) : (
           <div className="overflow-x-auto">

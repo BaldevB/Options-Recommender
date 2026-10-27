@@ -32,14 +32,19 @@ def _store_in_matrix_cache(key: str, data: Any) -> None:
 
 
 def get_available_expirations(symbol: str) -> List[str]:
-    """Retrieve list of expiration date strings (YYYY-MM-DD) for a symbol."""
-    try:
-        ticker = yf.Ticker(symbol)
-        options = ticker.options
-        return list(options) if options else []
-    except Exception as exc:
-        logger.error("Failed to fetch expirations for %s: %s", symbol, exc)
-        return []
+    """Retrieve list of expiration date strings (YYYY-MM-DD) for a symbol with retry."""
+    sym = symbol.strip().upper().replace(".", "-")
+    for attempt in range(2):
+        try:
+            ticker = yf.Ticker(sym)
+            options = ticker.options
+            if options:
+                return list(options)
+            time.sleep(0.3)
+        except Exception as exc:
+            logger.warning("Attempt %d: Failed to fetch expirations for %s: %s", attempt + 1, sym, exc)
+            time.sleep(0.3)
+    return []
 
 
 def calculate_dte(expiration_str: str) -> int:
@@ -131,7 +136,7 @@ def get_options_chains(
     Returns:
         Tuple: (calls_df, puts_df, filtered_expirations)
     """
-    symbol = symbol.strip().upper()
+    symbol = symbol.strip().upper().replace(".", "-")
     all_expirations = get_available_expirations(symbol)
     if not all_expirations:
         return pd.DataFrame(), pd.DataFrame(), []
@@ -176,21 +181,42 @@ def get_options_chain_matrix(
     from data.price_data import get_current_quote
     from options.suggester import calculate_chain_analytics, build_chain_matrix
 
-    symbol = symbol.strip().upper()
+    symbol = symbol.strip().upper().replace(".", "-")
     quote = get_current_quote(symbol)
     spot_price = float(quote.get("current_price", 0.0))
+
+    # Fallback to direct ticker probe if spot_price <= 0
+    if spot_price <= 0:
+        try:
+            t = yf.Ticker(symbol)
+            fi = getattr(t, "fast_info", None)
+            if fi:
+                p = getattr(fi, "last_price", None) or getattr(fi, "regular_market_price", None)
+                if p is not None and not pd.isna(p):
+                    spot_price = float(p)
+            if spot_price <= 0:
+                h = t.history(period="5d")
+                if h is not None and not h.empty:
+                    spot_price = float(h["Close"].iloc[-1])
+        except Exception as exc:
+            logger.warning("Could not probe spot price fallback for %s: %s", symbol, exc)
 
     all_expirations = get_available_expirations(symbol)
     if not all_expirations:
         return {
             "symbol": symbol,
+            "name": quote.get("name", symbol),
             "current_price": spot_price,
+            "change": quote.get("change", 0.0),
+            "change_pct": quote.get("change_percent", 0.0),
             "available_expirations": [],
             "selected_expiration": None,
             "dte": 0,
             "analytics": {},
             "strikes": [],
-            "error": f"No options available for {symbol}"
+            "error": f"No options available for {symbol}",
+            "data_source": "yfinance (15m delayed standard equity / options quotes)",
+            "retrieved_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         }
 
     # Build available expirations list with DTE
@@ -220,6 +246,50 @@ def get_options_chain_matrix(
         calls_df = _clean_chain_df(chain.calls, target_exp, dte, "CALL")
         puts_df = _clean_chain_df(chain.puts, target_exp, dte, "PUT")
 
+        # Fallback if selected expiration returned empty chain (e.g. after-hours rollover)
+        if (calls_df.empty and puts_df.empty) and len(exp_list) > 1:
+            for alt_exp in [e["expiration"] for e in exp_list if e["expiration"] != target_exp][:2]:
+                try:
+                    alt_chain = ticker.option_chain(alt_exp)
+                    alt_dte = calculate_dte(alt_exp)
+                    c_alt = _clean_chain_df(alt_chain.calls, alt_exp, alt_dte, "CALL")
+                    p_alt = _clean_chain_df(alt_chain.puts, alt_exp, alt_dte, "PUT")
+                    if not c_alt.empty or not p_alt.empty:
+                        target_exp = alt_exp
+                        dte = alt_dte
+                        calls_df = c_alt
+                        puts_df = p_alt
+                        break
+                except Exception:
+                    continue
+
+        # If spot price is still 0 but we have contracts, infer spot price from strike median
+        if spot_price <= 0:
+            strikes = []
+            if not calls_df.empty:
+                strikes.extend(calls_df["strike"].tolist())
+            if not puts_df.empty:
+                strikes.extend(puts_df["strike"].tolist())
+            if strikes:
+                spot_price = float(pd.Series(strikes).median())
+
+        if calls_df.empty and puts_df.empty:
+            return {
+                "symbol": symbol,
+                "name": quote.get("name", symbol),
+                "current_price": spot_price,
+                "change": quote.get("change", 0.0),
+                "change_pct": quote.get("change_percent", 0.0),
+                "available_expirations": exp_list,
+                "selected_expiration": target_exp,
+                "dte": dte,
+                "analytics": {},
+                "strikes": [],
+                "error": f"No active contracts reported for {symbol} on {target_exp}. Please select another expiration date.",
+                "data_source": "yfinance (15m delayed standard equity / options quotes)",
+                "retrieved_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            }
+
         analytics = calculate_chain_analytics(spot_price, dte, calls_df, puts_df)
         strikes_matrix = build_chain_matrix(spot_price, calls_df, puts_df, dte)
 
@@ -245,13 +315,18 @@ def get_options_chain_matrix(
         logger.error("Error building options chain matrix for %s (%s): %s", symbol, target_exp, exc)
         return {
             "symbol": symbol,
+            "name": quote.get("name", symbol),
             "current_price": spot_price,
+            "change": quote.get("change", 0.0),
+            "change_pct": quote.get("change_percent", 0.0),
             "available_expirations": exp_list,
             "selected_expiration": target_exp,
             "dte": dte,
             "analytics": {},
             "strikes": [],
-            "error": str(exc)
+            "error": str(exc),
+            "data_source": "yfinance (15m delayed standard equity / options quotes)",
+            "retrieved_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         }
 
 
@@ -264,7 +339,7 @@ def get_volatility_cockpit(symbol: str) -> Dict[str, Any]:
     from data.price_data import get_price_history, get_current_quote
     import numpy as np
 
-    symbol = symbol.strip().upper()
+    symbol = symbol.strip().upper().replace(".", "-")
     quote = get_current_quote(symbol)
     spot = float(quote.get("current_price", 0.0))
     if spot <= 0:
