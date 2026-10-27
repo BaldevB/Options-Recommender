@@ -16,6 +16,7 @@ import {
   Star,
   Compass,
   Wallet,
+  Check,
 } from "lucide-react";
 
 export interface TradePlan {
@@ -77,6 +78,8 @@ interface StockCardProps {
   onPaperBuy: (stock: StockRecommendationItem) => void;
   isStarred?: boolean;
   onToggleStar?: (symbol: string) => void;
+  isSelected?: boolean;
+  onToggleSelect?: (stock: StockRecommendationItem) => void;
 }
 
 export default function StockCard({
@@ -85,6 +88,8 @@ export default function StockCard({
   onPaperBuy,
   isStarred = false,
   onToggleStar,
+  isSelected = false,
+  onToggleSelect,
 }: StockCardProps) {
   const isPositive = stock.change_pct >= 0;
   const plan = stock.trade_plan;
@@ -261,11 +266,34 @@ export default function StockCard({
   };
 
   return (
-    <div className="group relative flex flex-col justify-between rounded-xl border border-slate-800 bg-[#0d1424]/90 p-5 shadow-lg backdrop-blur-md transition-all duration-200 hover:border-cyan-500/40 hover:shadow-[0_0_24px_rgba(6,182,212,0.15)]">
+    <div
+      className={`group relative flex flex-col justify-between rounded-xl border bg-[#0d1424]/90 p-5 shadow-lg backdrop-blur-md transition-all duration-200 ${
+        isSelected
+          ? "border-cyan-500/80 shadow-[0_0_24px_rgba(6,182,212,0.25)] ring-1 ring-cyan-500/40"
+          : "border-slate-800 hover:border-cyan-500/40 hover:shadow-[0_0_24px_rgba(6,182,212,0.15)]"
+      }`}
+    >
       {/* Top Header */}
       <div>
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-2.5">
+            {onToggleSelect && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggleSelect(stock);
+                }}
+                className={`w-5 h-5 rounded border flex items-center justify-center transition-all ${
+                  isSelected
+                    ? "bg-cyan-500 border-cyan-400 text-slate-950 shadow-[0_0_8px_rgba(6,182,212,0.5)]"
+                    : "border-slate-700 bg-slate-900/80 hover:border-cyan-500/60 text-transparent"
+                }`}
+                title={isSelected ? "Remove from comparison" : "Select for comparison (up to 3)"}
+              >
+                <Check className="w-3.5 h-3.5 stroke-[3]" />
+              </button>
+            )}
             <div className="flex flex-col">
               <div className="flex items-center gap-2">
                 <span className="text-xl font-black tracking-wider text-slate-100 group-hover:text-cyan-400 transition-colors">

@@ -27,6 +27,8 @@ interface StockScreenerTableProps {
   onPaperBuy: (stock: StockRecommendationItem) => void;
   starredTickers?: string[];
   onToggleStar?: (symbol: string) => void;
+  selectedTickers?: string[];
+  onToggleSelect?: (stock: StockRecommendationItem) => void;
 }
 
 export default function StockScreenerTable({
@@ -38,6 +40,8 @@ export default function StockScreenerTable({
   onPaperBuy,
   starredTickers = [],
   onToggleStar,
+  selectedTickers = [],
+  onToggleSelect,
 }: StockScreenerTableProps) {
   const renderSortIcon = (column: string) => {
     if (sortBy !== column) {
@@ -163,7 +167,12 @@ export default function StockScreenerTable({
         <table className="w-full text-left text-xs text-slate-300">
           <thead className="border-b border-slate-800 bg-[#080d19] text-[11px] uppercase tracking-wider text-slate-400 font-semibold select-none">
             <tr>
-              <th scope="col" className="py-3 px-3 w-8"></th>
+              {/* Compare Select Checkbox */}
+              <th scope="col" className="py-3 px-2 w-8 text-center" title="Select for comparison (up to 3)">
+                <Layers className="w-3.5 h-3.5 mx-auto text-slate-500" />
+              </th>
+              {/* Star Watchlist */}
+              <th scope="col" className="py-3 px-2 w-8 text-center"></th>
               <th
                 scope="col"
                 className="py-3 px-3 cursor-pointer hover:text-cyan-400 transition-colors"
@@ -287,7 +296,7 @@ export default function StockScreenerTable({
           <tbody className="divide-y divide-slate-800/60 font-medium">
             {stocks.length === 0 ? (
               <tr>
-                <td colSpan={22} className="py-12 text-center text-slate-500 text-sm">
+                <td colSpan={23} className="py-12 text-center text-slate-500 text-sm">
                   No stock recommendations match your filter criteria.
                 </td>
               </tr>
@@ -295,13 +304,33 @@ export default function StockScreenerTable({
               stocks.map((stock) => {
                 const isPositive = stock.change_pct >= 0;
                 const isStarred = starredTickers.includes(stock.symbol);
+                const isSelected = selectedTickers.includes(stock.symbol);
                 const plan = stock.trade_plan;
 
                 return (
                   <tr
                     key={stock.symbol}
-                    className="hover:bg-slate-800/40 transition-colors duration-150 group"
+                    className={`hover:bg-slate-800/40 transition-colors duration-150 group ${
+                      isSelected ? "bg-cyan-950/25" : ""
+                    }`}
                   >
+                    {/* Compare Checkbox */}
+                    <td className="py-3 px-2 text-center">
+                      {onToggleSelect && (
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => onToggleSelect(stock)}
+                          className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-cyan-500/20 cursor-pointer accent-cyan-500"
+                          title={
+                            isSelected
+                              ? "Remove from comparison"
+                              : "Select for comparison (up to 3)"
+                          }
+                        />
+                      )}
+                    </td>
+
                     {/* Star Button */}
                     <td className="py-3 px-2 text-center">
                       {onToggleStar && (

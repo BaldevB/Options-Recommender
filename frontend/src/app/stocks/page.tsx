@@ -38,6 +38,7 @@ import StockCard, { StockRecommendationItem } from "@/components/StockCard";
 import StockScreenerTable from "@/components/StockScreenerTable";
 import StockPositionCalculator from "@/components/StockPositionCalculator";
 import StockPaperTradingDrawer from "@/components/StockPaperTradingDrawer";
+import StockComparisonDrawer from "@/components/StockComparisonDrawer";
 import { StockMonteCarlo } from "@/components/StockMonteCarlo";
 
 // Dynamically import StockChart with ssr: false for Lightweight Charts canvas support
@@ -125,6 +126,10 @@ function StockRecommendationsContent() {
   const [paperPositionsCount, setPaperPositionsCount] = useState<number>(0);
   const [isPaperDrawerOpen, setIsPaperDrawerOpen] = useState<boolean>(false);
 
+  // Comparison State
+  const [selectedForComparison, setSelectedForComparison] = useState<StockRecommendationItem[]>([]);
+  const [isComparisonOpen, setIsComparisonOpen] = useState<boolean>(false);
+
   // Deep Dive Modal State
   const [deepDiveStock, setDeepDiveStock] = useState<StockRecommendationItem | null>(null);
   const [deepDiveAnalysis, setDeepDiveAnalysis] = useState<any>(null);
@@ -139,12 +144,38 @@ function StockRecommendationsContent() {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // Show Toast
-  const showToast = (msg: string) => {
+  const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
     setTimeout(() => {
       setToastMessage((cur) => (cur === msg ? null : cur));
     }, 4500);
-  };
+  }, []);
+
+  // Comparison Selection Handlers
+  const handleToggleComparison = useCallback(
+    (stock: StockRecommendationItem) => {
+      setSelectedForComparison((prev) => {
+        const exists = prev.some((s) => s.symbol === stock.symbol);
+        if (exists) {
+          return prev.filter((s) => s.symbol !== stock.symbol);
+        }
+        if (prev.length >= 3) {
+          showToast("Maximum 3 stocks can be compared at once");
+          return prev;
+        }
+        return [...prev, stock];
+      });
+    },
+    [showToast]
+  );
+
+  const handleRemoveComparison = useCallback((symbol: string) => {
+    setSelectedForComparison((prev) => prev.filter((s) => s.symbol !== symbol));
+  }, []);
+
+  const handleClearComparison = useCallback(() => {
+    setSelectedForComparison([]);
+  }, []);
 
   // Price Bounds mapping
   const priceBounds = useMemo(() => {
@@ -502,7 +533,7 @@ function StockRecommendationsContent() {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
     showToast(`Exported ${sortedRecommendations.length} picks to CSV`);
-  }, [sortedRecommendations]);
+  }, [sortedRecommendations, showToast]);
 
   return (
     <div className="min-h-screen bg-[#070b14] text-slate-100 flex flex-col font-sans selection:bg-cyan-500/30 selection:text-cyan-200">
@@ -958,6 +989,8 @@ function StockRecommendationsContent() {
                 onPaperBuy={(stk) => setCalculatorStock(stk)}
                 isStarred={starredTickers.includes(stock.symbol)}
                 onToggleStar={handleToggleStar}
+                isSelected={selectedForComparison.some((s) => s.symbol === stock.symbol)}
+                onToggleSelect={handleToggleComparison}
               />
             ))}
           </div>
@@ -971,6 +1004,8 @@ function StockRecommendationsContent() {
             onPaperBuy={(stk) => setCalculatorStock(stk)}
             starredTickers={starredTickers}
             onToggleStar={handleToggleStar}
+            selectedTickers={selectedForComparison.map((s) => s.symbol)}
+            onToggleSelect={handleToggleComparison}
           />
         )}
       </main>
@@ -1069,203 +1104,207 @@ function StockRecommendationsContent() {
                 />
               ) : (
                 <>
-              {/* TradingView Chart */}
-              <div>
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="text-xs uppercase font-bold text-slate-400 tracking-wider flex items-center gap-1.5">
-                    <Activity className="w-3.5 h-3.5 text-cyan-400" />
-                    TradingView Candlestick Chart &amp; Moving Averages
-                  </h3>
-                  <span className="text-[11px] text-slate-500 font-mono">Interactive &bull; Multi-Timeframe</span>
-                </div>
-                <div className="rounded-xl overflow-hidden border border-slate-800 bg-[#0c1322]">
-                  <StockChart symbol={deepDiveStock.symbol} data={deepDiveCandles} />
-                </div>
-              </div>
-
-              {/* Trade Plan Detailed Breakdown */}
-              <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-3">
-                <h3 className="text-xs uppercase font-bold text-emerald-400 tracking-wider flex items-center gap-1.5">
-                  <ShieldCheck className="w-4 h-4" />
-                  Quantitative Trade Plan &amp; Risk Parameters
-                </h3>
-
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
-                  <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
-                    <span className="text-[10px] text-slate-400 uppercase block">Current Price</span>
-                    <span className="font-mono font-bold text-slate-100 text-sm">
-                      ${deepDiveStock.price > 0 ? deepDiveStock.price.toFixed(2) : deepDiveStock.trade_plan.current_price.toFixed(2)}
-                    </span>
+                  {/* TradingView Chart */}
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <h3 className="text-xs uppercase font-bold text-slate-400 tracking-wider flex items-center gap-1.5">
+                        <Activity className="w-3.5 h-3.5 text-cyan-400" />
+                        TradingView Candlestick Chart &amp; Moving Averages
+                      </h3>
+                      <span className="text-[11px] text-slate-500 font-mono">Interactive &bull; Multi-Timeframe</span>
+                    </div>
+                    <div className="rounded-xl overflow-hidden border border-slate-800 bg-[#0c1322]">
+                      <StockChart symbol={deepDiveStock.symbol} data={deepDiveCandles} />
+                    </div>
                   </div>
 
-                  <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
-                    <span className="text-[10px] text-slate-400 uppercase block">Recommended Entry</span>
-                    <span className="font-mono font-bold text-cyan-300 text-sm">
-                      ${deepDiveStock.trade_plan.entry_zone ? `${deepDiveStock.trade_plan.entry_zone[0].toFixed(2)} - ${deepDiveStock.trade_plan.entry_zone[1].toFixed(2)}` : deepDiveStock.price.toFixed(2)}
-                    </span>
-                  </div>
-
-                  <div className="p-3 rounded-lg bg-emerald-950/25 border border-emerald-900/40">
-                    <span className="text-[10px] text-emerald-400 uppercase block">Target 1 (TP1)</span>
-                    <span className="font-mono font-bold text-emerald-300 text-sm">
-                      ${deepDiveStock.trade_plan.tp1.toFixed(2)} (+{deepDiveStock.trade_plan.tp1_pct.toFixed(1)}%)
-                    </span>
-                  </div>
-
-                  <div className="p-3 rounded-lg bg-rose-950/25 border border-rose-900/40">
-                    <span className="text-[10px] text-rose-400 uppercase block">Stop Loss (SL)</span>
-                    <span className="font-mono font-bold text-rose-300 text-sm">
-                      ${deepDiveStock.trade_plan.stop_loss.toFixed(2)} (-{deepDiveStock.trade_plan.invalidation_pct.toFixed(1)}%)
-                    </span>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs pt-1">
-                  <div className="p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/80">
-                    <span className="text-[10px] text-slate-400 uppercase block">Relative Strength</span>
-                    <span className="font-mono font-bold text-cyan-300">
-                      {deepDiveStock.relative_strength_score !== undefined
-                        ? `RS ${Math.round(deepDiveStock.relative_strength_score)}/99`
-                        : "—"}
-                    </span>
-                  </div>
-                  <div className="p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/80">
-                    <span className="text-[10px] text-slate-400 uppercase block">52W High Distance</span>
-                    <span className="font-mono font-bold text-amber-300">
-                      {deepDiveStock.distance_from_52w_high_pct !== undefined
-                        ? deepDiveStock.distance_from_52w_high_pct >= -0.1
-                          ? "AT HIGH"
-                          : `${deepDiveStock.distance_from_52w_high_pct.toFixed(1)}%`
-                        : "—"}
-                    </span>
-                  </div>
-                  <div className="p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/80">
-                    <span className="text-[10px] text-slate-400 uppercase block">Stage 2 Template</span>
-                    <span className="font-mono font-bold text-amber-300">
-                      {deepDiveStock.is_stage_2 ? "🔥 Confirmed" : "Not Aligned"}
-                    </span>
-                  </div>
-                  <div className="p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/80">
-                    <span className="text-[10px] text-slate-400 uppercase block">A/D Inflow Rating</span>
-                    <span className="font-mono font-bold text-emerald-400">
-                      {deepDiveStock.accumulation_rating
-                        ? `${deepDiveStock.accumulation_rating} (${deepDiveStock.up_down_volume_ratio ? deepDiveStock.up_down_volume_ratio.toFixed(1) + "x" : "—"})`
-                        : "—"}
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Short-Term Momentum Impulse Panel */}
-              {(deepDiveStock.roc_3d !== undefined || deepDiveStock.short_term_momentum_score !== undefined) && (
-                <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-xs uppercase font-bold text-cyan-400 tracking-wider flex items-center gap-1.5">
-                      <Zap className="w-4 h-4 text-cyan-400" />
-                      Short-Term Momentum &amp; Velocity Impulse
+                  {/* Trade Plan Detailed Breakdown */}
+                  <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-3">
+                    <h3 className="text-xs uppercase font-bold text-emerald-400 tracking-wider flex items-center gap-1.5">
+                      <ShieldCheck className="w-4 h-4" />
+                      Quantitative Trade Plan &amp; Risk Parameters
                     </h3>
-                    {deepDiveStock.short_term_setup && (
-                      <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">
-                        ⚡ {deepDiveStock.short_term_setup.replace(/_/g, " ")}
-                      </span>
-                    )}
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                      <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
+                        <span className="text-[10px] text-slate-400 uppercase block">Current Price</span>
+                        <span className="font-mono font-bold text-slate-100 text-sm">
+                          ${deepDiveStock.price > 0 ? deepDiveStock.price.toFixed(2) : deepDiveStock.trade_plan.current_price.toFixed(2)}
+                        </span>
+                      </div>
+
+                      <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
+                        <span className="text-[10px] text-slate-400 uppercase block">Recommended Entry</span>
+                        <span className="font-mono font-bold text-cyan-300 text-sm">
+                          ${deepDiveStock.trade_plan.entry_zone ? `${deepDiveStock.trade_plan.entry_zone[0].toFixed(2)} - ${deepDiveStock.trade_plan.entry_zone[1].toFixed(2)}` : deepDiveStock.price.toFixed(2)}
+                        </span>
+                      </div>
+
+                      <div className="p-3 rounded-lg bg-emerald-950/25 border border-emerald-900/40">
+                        <span className="text-[10px] text-emerald-400 uppercase block">Target 1 (TP1)</span>
+                        <span className="font-mono font-bold text-emerald-300 text-sm">
+                          ${deepDiveStock.trade_plan.tp1.toFixed(2)} (+{deepDiveStock.trade_plan.tp1_pct.toFixed(1)}%)
+                        </span>
+                      </div>
+
+                      <div className="p-3 rounded-lg bg-rose-950/25 border border-rose-900/40">
+                        <span className="text-[10px] text-rose-400 uppercase block">Stop Loss (SL)</span>
+                        <span className="font-mono font-bold text-rose-300 text-sm">
+                          ${deepDiveStock.trade_plan.stop_loss.toFixed(2)} (-{deepDiveStock.trade_plan.invalidation_pct.toFixed(1)}%)
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs pt-1">
+                      <div className="p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/80">
+                        <span className="text-[10px] text-slate-400 uppercase block">Relative Strength</span>
+                        <span className="font-mono font-bold text-cyan-300">
+                          {deepDiveStock.relative_strength_score !== undefined
+                            ? `RS ${Math.round(deepDiveStock.relative_strength_score)}/99`
+                            : "—"}
+                        </span>
+                      </div>
+                      <div className="p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/80">
+                        <span className="text-[10px] text-slate-400 uppercase block">52W High Distance</span>
+                        <span className="font-mono font-bold text-amber-300">
+                          {deepDiveStock.distance_from_52w_high_pct !== undefined
+                            ? deepDiveStock.distance_from_52w_high_pct >= -0.1
+                              ? "AT HIGH"
+                              : `${deepDiveStock.distance_from_52w_high_pct.toFixed(1)}%`
+                            : "—"}
+                        </span>
+                      </div>
+                      <div className="p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/80">
+                        <span className="text-[10px] text-slate-400 uppercase block">Stage 2 Template</span>
+                        <span className="font-mono font-bold text-amber-300">
+                          {deepDiveStock.is_stage_2 ? "🔥 Confirmed" : "Not Aligned"}
+                        </span>
+                      </div>
+                      <div className="p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/80">
+                        <span className="text-[10px] text-slate-400 uppercase block">A/D Inflow Rating</span>
+                        <span className="font-mono font-bold text-emerald-400">
+                          {deepDiveStock.accumulation_rating
+                            ? `${deepDiveStock.accumulation_rating} (${deepDiveStock.up_down_volume_ratio ? deepDiveStock.up_down_volume_ratio.toFixed(1) + "x" : "—"})`
+                            : "—"}
+                        </span>
+                      </div>
+                    </div>
                   </div>
 
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
-                    <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
-                      <span className="text-[10px] text-slate-400 uppercase block">3-Day Velocity (ROC)</span>
-                      <span className={`font-mono font-bold text-sm ${
-                        (deepDiveStock.roc_3d ?? 0) >= 2.5
-                          ? "text-cyan-300"
-                          : (deepDiveStock.roc_3d ?? 0) >= 0
-                          ? "text-emerald-400"
-                          : "text-rose-400"
-                      }`}>
-                        {(deepDiveStock.roc_3d ?? 0) >= 0 ? "+" : ""}{(deepDiveStock.roc_3d ?? 0).toFixed(2)}%
-                      </span>
-                    </div>
+                  {/* Short-Term Momentum Impulse Panel */}
+                  {(deepDiveStock.roc_3d !== undefined || deepDiveStock.short_term_momentum_score !== undefined) && (
+                    <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-xs uppercase font-bold text-cyan-400 tracking-wider flex items-center gap-1.5">
+                          <Zap className="w-4 h-4 text-cyan-400" />
+                          Short-Term Momentum &amp; Velocity Impulse
+                        </h3>
+                        {deepDiveStock.short_term_setup && (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">
+                            ⚡ {deepDiveStock.short_term_setup.replace(/_/g, " ")}
+                          </span>
+                        )}
+                      </div>
 
-                    <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
-                      <span className="text-[10px] text-slate-400 uppercase block">5-Day Rate of Change</span>
-                      <span className={`font-mono font-bold text-sm ${
-                        (deepDiveStock.roc_5d ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"
-                      }`}>
-                        {(deepDiveStock.roc_5d ?? 0) >= 0 ? "+" : ""}{(deepDiveStock.roc_5d ?? 0).toFixed(2)}%
-                      </span>
-                    </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                        <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
+                          <span className="text-[10px] text-slate-400 uppercase block">3-Day Velocity (ROC)</span>
+                          <span
+                            className={`font-mono font-bold text-sm ${
+                              (deepDiveStock.roc_3d ?? 0) >= 2.5
+                                ? "text-cyan-300"
+                                : (deepDiveStock.roc_3d ?? 0) >= 0
+                                ? "text-emerald-400"
+                                : "text-rose-400"
+                            }`}
+                          >
+                            {(deepDiveStock.roc_3d ?? 0) >= 0 ? "+" : ""}{(deepDiveStock.roc_3d ?? 0).toFixed(2)}%
+                          </span>
+                        </div>
 
-                    <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
-                      <span className="text-[10px] text-slate-400 uppercase block">5-Day Relative Volume</span>
-                      <span className="font-mono font-bold text-amber-300 text-sm">
-                        {(deepDiveStock.short_term_rvol ?? deepDiveStock.volume_ratio).toFixed(2)}x
-                      </span>
-                    </div>
+                        <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
+                          <span className="text-[10px] text-slate-400 uppercase block">5-Day Rate of Change</span>
+                          <span
+                            className={`font-mono font-bold text-sm ${
+                              (deepDiveStock.roc_5d ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"
+                            }`}
+                          >
+                            {(deepDiveStock.roc_5d ?? 0) >= 0 ? "+" : ""}{(deepDiveStock.roc_5d ?? 0).toFixed(2)}%
+                          </span>
+                        </div>
 
-                    <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
-                      <span className="text-[10px] text-slate-400 uppercase block">8/21 EMA Spread</span>
-                      <span className="font-mono font-bold text-purple-300 text-sm">
-                        {(deepDiveStock.ema_spread_pct ?? 0) >= 0 ? "+" : ""}{(deepDiveStock.ema_spread_pct ?? 0).toFixed(2)}%
-                      </span>
+                        <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
+                          <span className="text-[10px] text-slate-400 uppercase block">5-Day Relative Volume</span>
+                          <span className="font-mono font-bold text-amber-300 text-sm">
+                            {(deepDiveStock.short_term_rvol ?? deepDiveStock.volume_ratio).toFixed(2)}x
+                          </span>
+                        </div>
+
+                        <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
+                          <span className="text-[10px] text-slate-400 uppercase block">8/21 EMA Spread</span>
+                          <span className="font-mono font-bold text-purple-300 text-sm">
+                            {(deepDiveStock.ema_spread_pct ?? 0) >= 0 ? "+" : ""}{(deepDiveStock.ema_spread_pct ?? 0).toFixed(2)}%
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs pt-1">
+                        <div className="p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/80">
+                          <span className="text-[10px] text-slate-400 uppercase block">Short-Term Score</span>
+                          <span className="font-mono font-bold text-cyan-300">
+                            {Math.round(deepDiveStock.short_term_momentum_score ?? 50)}/100
+                          </span>
+                        </div>
+
+                        <div className="p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/80">
+                          <span className="text-[10px] text-slate-400 uppercase block">Fast RSI (5-Period)</span>
+                          <span className="font-mono font-bold text-slate-200">
+                            {(deepDiveStock.short_term_rsi ?? deepDiveStock.rsi).toFixed(1)}
+                          </span>
+                        </div>
+
+                        <div className="p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/80">
+                          <span className="text-[10px] text-slate-400 uppercase block">10-Day High Breakout</span>
+                          <span className="font-mono font-bold text-emerald-400">
+                            {deepDiveStock.is_short_term_breakout ? "🚀 Active Breakout" : "Near Range"}
+                          </span>
+                        </div>
+                      </div>
                     </div>
+                  )}
+
+                  {/* Rationale & News Sentiment */}
+                  {deepDiveStock.rationale && deepDiveStock.rationale.length > 0 && (
+                    <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
+                      <h4 className="text-xs uppercase font-bold text-slate-400 tracking-wider">
+                        Signal Rationale &amp; Catalyst Breakdown
+                      </h4>
+                      <ul className="space-y-1.5 text-xs text-slate-300">
+                        {deepDiveStock.rationale.map((reason, idx) => (
+                          <li key={idx} className="flex items-start gap-2">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0 mt-0.5" />
+                            <span>{reason}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Embedded Position Sizing Calculator */}
+                  <div>
+                    <StockPositionCalculator
+                      stock={deepDiveStock}
+                      virtualBalance={paperBalance}
+                      onTradeSimulated={(trade) => {
+                        showToast(
+                          `Paper trade filled: ${trade.shares} shares of ${trade.symbol} @ $${trade.price.toFixed(2)} ($${trade.totalCost.toFixed(2)})`
+                        );
+                        setPaperBalance((prev) => Math.max(0, prev - trade.totalCost));
+                        setPaperPositionsCount((prev) => prev + 1);
+                      }}
+                      onClose={() => setDeepDiveStock(null)}
+                    />
                   </div>
-
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs pt-1">
-                    <div className="p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/80">
-                      <span className="text-[10px] text-slate-400 uppercase block">Short-Term Score</span>
-                      <span className="font-mono font-bold text-cyan-300">
-                        {Math.round(deepDiveStock.short_term_momentum_score ?? 50)}/100
-                      </span>
-                    </div>
-
-                    <div className="p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/80">
-                      <span className="text-[10px] text-slate-400 uppercase block">Fast RSI (5-Period)</span>
-                      <span className="font-mono font-bold text-slate-200">
-                        {(deepDiveStock.short_term_rsi ?? deepDiveStock.rsi).toFixed(1)}
-                      </span>
-                    </div>
-
-                    <div className="p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/80">
-                      <span className="text-[10px] text-slate-400 uppercase block">10-Day High Breakout</span>
-                      <span className="font-mono font-bold text-emerald-400">
-                        {deepDiveStock.is_short_term_breakout ? "🚀 Active Breakout" : "Near Range"}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Rationale & News Sentiment */}
-              {deepDiveStock.rationale && deepDiveStock.rationale.length > 0 && (
-                <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
-                  <h4 className="text-xs uppercase font-bold text-slate-400 tracking-wider">
-                    Signal Rationale &amp; Catalyst Breakdown
-                  </h4>
-                  <ul className="space-y-1.5 text-xs text-slate-300">
-                    {deepDiveStock.rationale.map((reason, idx) => (
-                      <li key={idx} className="flex items-start gap-2">
-                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0 mt-0.5" />
-                        <span>{reason}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-
-              {/* Embedded Position Sizing Calculator */}
-              <div>
-                <StockPositionCalculator
-                  stock={deepDiveStock}
-                  virtualBalance={paperBalance}
-                  onTradeSimulated={(trade) => {
-                    showToast(
-                      `Paper trade filled: ${trade.shares} shares of ${trade.symbol} @ $${trade.price.toFixed(2)} ($${trade.totalCost.toFixed(2)})`
-                    );
-                    setPaperBalance((prev) => Math.max(0, prev - trade.totalCost));
-                    setPaperPositionsCount((prev) => prev + 1);
-                  }}
-                  onClose={() => setDeepDiveStock(null)}
-                />
-              </div>
                 </>
               )}
             </div>
@@ -1304,6 +1343,62 @@ function StockRecommendationsContent() {
         }}
         onNavigateToOptions={(sym) => {
           router.push(`/?ticker=${encodeURIComponent(sym)}&action=options`);
+        }}
+      />
+
+      {/* Floating Comparison Bottom Bar */}
+      {selectedForComparison.length > 0 && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 bg-[#0c1427]/95 border border-cyan-500/40 rounded-2xl shadow-[0_10px_35px_rgba(0,0,0,0.7),0_0_20px_rgba(6,182,212,0.25)] px-4 sm:px-6 py-3 flex items-center gap-3 sm:gap-6 backdrop-blur-lg animate-in slide-in-from-bottom-5">
+          <div className="flex items-center gap-2">
+            <div className="flex -space-x-1">
+              {selectedForComparison.map((stk) => (
+                <span
+                  key={stk.symbol}
+                  className="inline-flex items-center justify-center px-2 py-0.5 rounded-lg bg-slate-800 border border-cyan-500/50 text-[11px] font-mono font-bold text-cyan-300 shadow-sm"
+                >
+                  {stk.symbol}
+                </span>
+              ))}
+            </div>
+            <span className="text-xs font-semibold text-slate-300">
+              <span className="font-bold text-cyan-400">{selectedForComparison.length}</span> of 3 selected
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setIsComparisonOpen(true)}
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-cyan-500 to-emerald-500 hover:from-cyan-400 hover:to-emerald-400 text-slate-950 shadow-[0_0_15px_rgba(6,182,212,0.4)] transition-all cursor-pointer"
+            >
+              <Layers className="w-3.5 h-3.5" />
+              <span>Compare Now</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleClearComparison}
+              className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 text-slate-400 hover:text-slate-200 border border-slate-700 transition-colors text-xs font-medium cursor-pointer"
+              title="Clear selection"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Stock Comparison Drawer Modal */}
+      <StockComparisonDrawer
+        isOpen={isComparisonOpen}
+        onClose={() => setIsComparisonOpen(false)}
+        stocks={selectedForComparison}
+        onRemoveStock={handleRemoveComparison}
+        onAnalyzeStock={(stk) => {
+          setIsComparisonOpen(false);
+          openDeepDive(stk);
+        }}
+        onPaperBuyStock={(stk) => {
+          setCalculatorStock(stk);
         }}
       />
 
