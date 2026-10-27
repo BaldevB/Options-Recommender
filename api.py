@@ -1496,7 +1496,7 @@ def get_options_recommend_for_ticker(
 ):
     """Dynamic on-demand options recommendation endpoint for any US stock.
 
-    Synthesizes live Delta-targeted (0.40?0.50) options recommendations, vertical
+    Synthesizes live Delta-targeted (0.40-0.50) options recommendations, vertical
     debit spreads, and asymmetric lotto setups on demand for any ticker.
     """
     sym = (ticker or symbol or "").strip().upper()
@@ -1505,7 +1505,7 @@ def get_options_recommend_for_ticker(
 
     quote = get_current_quote(sym)
     stock_price = float(quote.get("current_price", 0.0)) if quote else 0.0
-    if not quote or not quote.get("valid") and stock_price <= 0:
+    if not quote or not quote.get("valid") or stock_price <= 0:
         raise HTTPException(status_code=404, detail=f"Stock quote not found for ticker: {sym}")
 
     # Fetch options chains
