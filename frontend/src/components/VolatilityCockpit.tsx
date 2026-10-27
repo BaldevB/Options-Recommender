@@ -48,6 +48,14 @@ interface VolatilityCockpitData {
   current_hv_60d: number;
   iv_rank: number;
   iv_percentile: number;
+  hv_benchmarked_iv_rank?: number;
+  hv_benchmarked_iv_percentile?: number;
+  metric_methodology?: string;
+  methodology_disclaimer?: string;
+  data_source?: string;
+  retrieved_at_utc?: string;
+  last_trade_time?: string;
+  bid_ask_sizes?: string;
   iv_floor: number;
   iv_ceiling: number;
   hv_min_1y: number;
@@ -129,8 +137,8 @@ export default function VolatilityCockpit({
   const activeMove = data.expected_moves.find((m) => m.id === selectedHorizon) || data.expected_moves[2];
 
   // Visual gauge colors
-  const rank = Math.min(100, Math.max(0, data.iv_rank));
-  const percentile = Math.min(100, Math.max(0, data.iv_percentile));
+  const rank = Math.min(100, Math.max(0, data.hv_benchmarked_iv_rank ?? data.iv_rank));
+  const percentile = Math.min(100, Math.max(0, data.hv_benchmarked_iv_percentile ?? data.iv_percentile));
 
   const getGaugeColor = (val: number) => {
     if (val < 30) return "text-emerald-400 stroke-emerald-400";
@@ -146,6 +154,29 @@ export default function VolatilityCockpit({
 
   return (
     <div className="space-y-6">
+      {/* ---------------- 0. DATA QUALITY & TRANSPARENCY BAR ---------------- */}
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-800 bg-[#070b14] px-4 py-2 text-[11px] text-slate-400">
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="flex items-center space-x-1">
+            <span className="h-2 w-2 rounded-full bg-emerald-400 inline-block" />
+            <strong className="text-slate-300">Source:</strong>
+            <span>{data.data_source || "yfinance (~15m delay)"}</span>
+          </span>
+          <span className="text-slate-700">|</span>
+          <span>
+            <strong className="text-slate-300">Retrieved (UTC):</strong> {data.retrieved_at_utc || "Recent"}
+          </span>
+          <span className="text-slate-700">|</span>
+          <span>
+            <strong className="text-slate-300">Bid/Ask Size:</strong> {data.bid_ask_sizes || "unavailable"}
+          </span>
+        </div>
+        <div className="flex items-center space-x-1.5 text-amber-400/90 font-medium">
+          <Info className="h-3.5 w-3.5 shrink-0" />
+          <span>Realized Vol Benchmark (Historical IV Series Not Stored by Free Feeds)</span>
+        </div>
+      </div>
+
       {/* ---------------- 1. TOP HEADER & VOLATILITY REGIME ---------------- */}
       <div
         className={`rounded-2xl border bg-gradient-to-r p-6 shadow-2xl transition ${
@@ -210,7 +241,7 @@ export default function VolatilityCockpit({
 
       {/* ---------------- 2. THREE CORE GAUGES (IV RANK, IV PERCENTILE, VRP) ---------------- */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        {/* Gauge 1: IV Rank */}
+        {/* Gauge 1: HV-Benchmarked IV Rank */}
         <div
           className={`flex flex-col justify-between rounded-xl border bg-gradient-to-b p-5 shadow-lg ${getGaugeGradient(
             rank
@@ -220,7 +251,7 @@ export default function VolatilityCockpit({
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center space-x-1.5">
                 <Gauge className="h-4 w-4 text-cyan-400" />
-                <span>IV Rank (1-Year Range)</span>
+                <span>HV-Benchmarked IV Rank (1Y)</span>
               </span>
               <span className={`text-xs font-black font-mono ${getGaugeColor(rank)}`}>
                 {rank < 30 ? "CHEAP" : rank > 65 ? "EXPENSIVE" : "FAIR"}
@@ -229,7 +260,7 @@ export default function VolatilityCockpit({
 
             <div className="mt-4 flex items-baseline justify-between">
               <span className="text-3xl font-black font-mono text-white">
-                {data.iv_rank.toFixed(1)}%
+                {rank.toFixed(1)}%
               </span>
               <span className="text-xs text-slate-400 font-mono">
                 ATM IV: <strong className="text-cyan-300">{data.current_iv}%</strong>
@@ -255,24 +286,24 @@ export default function VolatilityCockpit({
           </div>
 
           <p className="mt-4 text-[11px] text-slate-400 leading-relaxed border-t border-slate-800/80 pt-2.5">
-            Measures where current IV lies relative to its 52-week extremes. Low values indicate options are historically underpriced.
+            Scales current ATM IV against 1-year 21-day realized historical volatility extremes. (Realized Vol Benchmark: free feeds do not archive historical IV).
           </p>
         </div>
 
-        {/* Gauge 2: IV Percentile */}
+        {/* Gauge 2: IV vs Realized Vol Percentile */}
         <div className="flex flex-col justify-between rounded-xl border border-indigo-500/30 bg-gradient-to-b from-indigo-500/10 to-indigo-950/30 p-5 shadow-lg">
           <div>
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center space-x-1.5">
                 <Compass className="h-4 w-4 text-indigo-400" />
-                <span>IV Percentile (Days Below)</span>
+                <span>IV vs 1Y Realized Vol %ile</span>
               </span>
-              <span className="text-xs font-black font-mono text-indigo-300">HISTORICAL</span>
+              <span className="text-xs font-black font-mono text-indigo-300">BENCHMARK</span>
             </div>
 
             <div className="mt-4 flex items-baseline justify-between">
               <span className="text-3xl font-black font-mono text-white">
-                {data.iv_percentile.toFixed(1)}%
+                {percentile.toFixed(1)}%
               </span>
               <span className="text-xs text-slate-400 font-mono">
                 21d HV: <strong className="text-indigo-300">{data.current_hv_21d}%</strong>
@@ -296,7 +327,7 @@ export default function VolatilityCockpit({
           </div>
 
           <p className="mt-4 text-[11px] text-slate-400 leading-relaxed border-t border-slate-800/80 pt-2.5">
-            Percentage of trading days over the past year where realized volatility traded lower than today&apos;s implied pricing.
+            Percentage of trading days over past year where 21-day realized volatility was lower than today&apos;s implied pricing.
           </p>
         </div>
 

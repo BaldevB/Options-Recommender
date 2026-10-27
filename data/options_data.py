@@ -1,6 +1,6 @@
 """Options chain retrieval and expiration filtering using yfinance."""
 
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 import logging
 import time
 from typing import List, Tuple, Dict, Any, Optional
@@ -74,7 +74,7 @@ def filter_expirations_by_dte(
             if min_dte <= dte <= max_dte:
                 valid_exps.append((exp, dte))
 
-        # Strict DTE filtering: return only expirations within requested window
+    # Strict DTE filtering: return only expirations within requested window
     return valid_exps
 
 
@@ -234,6 +234,9 @@ def get_options_chain_matrix(
             "dte": dte,
             "analytics": analytics,
             "strikes": strikes_matrix,
+            "data_source": "yfinance (15m delayed standard equity / options quotes)",
+            "retrieved_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "bid_ask_sizes": "unavailable (yfinance standard)",
         }
 
         _store_in_matrix_cache(cache_key, result)
@@ -250,7 +253,6 @@ def get_options_chain_matrix(
             "strikes": [],
             "error": str(exc)
         }
-
 
 
 def get_volatility_cockpit(symbol: str) -> Dict[str, Any]:
@@ -322,7 +324,7 @@ def get_volatility_cockpit(symbol: str) -> Dict[str, Any]:
         elif term_structure:
             current_iv = term_structure[0]["atm_iv_pct"]
 
-    # 3. Calculate IV Rank & IV Percentile
+    # 3. Calculate IV Rank & IV Percentile benchmarked against Realized Volatility distribution
     iv_floor = min(hv_min, current_iv * 0.70)
     iv_ceiling = max(hv_max, current_iv * 1.30)
     denom = max(5.0, iv_ceiling - iv_floor)
@@ -392,6 +394,8 @@ def get_volatility_cockpit(symbol: str) -> Dict[str, Any]:
         else ("IV Discounted relative to Realized Vol" if vrp_ratio < 0.95 else "IV Fairly Valued vs Realized Vol")
     )
 
+    retrieved_at_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
     result = {
         "symbol": symbol,
         "name": quote.get("name", symbol),
@@ -403,6 +407,14 @@ def get_volatility_cockpit(symbol: str) -> Dict[str, Any]:
         "current_hv_60d": round(current_hv_60, 1),
         "iv_rank": round(iv_rank, 1),
         "iv_percentile": round(iv_percentile, 1),
+        "hv_benchmarked_iv_rank": round(iv_rank, 1),
+        "hv_benchmarked_iv_percentile": round(iv_percentile, 1),
+        "metric_methodology": "Realized Volatility Benchmark (Current ATM IV scaled against 1-Year 21-Day Historical Realized Volatility window; yfinance free tier lacks historical IV series)",
+        "methodology_disclaimer": "Note: Realized Volatility Benchmark is used because standard free data providers do not store historical implied volatility time series. True 52-week IV Rank requires historical options exchange archives.",
+        "data_source": "yfinance (15m delayed standard equity / options quotes)",
+        "retrieved_at_utc": retrieved_at_utc,
+        "last_trade_time": quote.get("last_trade_time", "unavailable"),
+        "bid_ask_sizes": "unavailable (yfinance standard)",
         "iv_floor": round(iv_floor, 1),
         "iv_ceiling": round(iv_ceiling, 1),
         "hv_min_1y": round(hv_min, 1),
