@@ -98,7 +98,8 @@ export function getSpreadAlternative(rec: PayoffModalRec): SpreadData {
     shortBid = +(longAsk * discount).toFixed(2);
     if (shortBid >= longAsk) shortBid = +(longAsk * 0.45).toFixed(2);
   } else {
-    shortStrike = Math.max(step, +(longStrike - step).toFixed(2));
+    const rawShort = +(longStrike - step).toFixed(2);
+    shortStrike = rawShort > 0 ? rawShort : +(longStrike * 0.5).toFixed(2);
     const discount = Math.max(0.35, Math.min(0.55, Math.abs(rec.delta || -0.45) * 0.95));
     shortBid = +(longAsk * discount).toFixed(2);
     if (shortBid >= longAsk) shortBid = +(longAsk * 0.45).toFixed(2);
@@ -250,7 +251,7 @@ export default function OptionPayoffModal({
       const tp1Stock = isCall
         ? +(breakeven + spread.width * 0.4).toFixed(2)
         : +(breakeven - spread.width * 0.4).toFixed(2);
-      const tp2Stock = isCall ? spread.short_strike : spread.short_strike;
+      const tp2Stock = spread.short_strike;
 
       return {
         isCall,

@@ -227,6 +227,7 @@ export default function BestOptionsHome({
     }
 
     setBoughtMap((prev) => ({ ...prev, [rec.id]: true }));
+    syncPaperPositions();
     setTimeout(() => {
       syncPaperPositions();
     }, 250);
