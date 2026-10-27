@@ -79,6 +79,10 @@ class StockRecommendation:
     short_term_momentum_score: float = 50.0
     short_term_setup: str = "MOMENTUM_CONSOLIDATION"
     is_short_term_breakout: bool = False
+    earnings_days_away: Optional[int] = None
+    is_earnings_imminent: bool = False
+    market_cap_tier: str = "LARGE"
+    is_earnings_blackout: bool = False
 
 
 def calculate_atr(
@@ -645,6 +649,7 @@ def generate_stock_recommendation(
     name: Optional[str] = None,
     horizon: Optional[TradeHorizon] = None,
     earnings_info: Optional[Dict[str, Any]] = None,
+    market_cap_tier: Optional[str] = None,
     **kwargs,
 ) -> StockRecommendation:
     """Generate a quantitative stock recommendation with actionable trade plan and scoring."""
@@ -703,6 +708,17 @@ def generate_stock_recommendation(
             sector = meta.get("sector", "Equities")
         if not sector:
             sector = "Equities"
+
+    # Resolve market cap tier
+    resolved_cap_tier = "LARGE"
+    if market_cap_tier:
+        resolved_cap_tier = str(market_cap_tier).strip().upper()
+    elif meta and meta.get("market_cap_tier"):
+        resolved_cap_tier = str(meta.get("market_cap_tier")).strip().upper()
+    elif quote and isinstance(quote, dict) and quote.get("market_cap_tier"):
+        resolved_cap_tier = str(quote.get("market_cap_tier")).strip().upper()
+    elif quote and hasattr(quote, "market_cap_tier") and getattr(quote, "market_cap_tier"):
+        resolved_cap_tier = str(getattr(quote, "market_cap_tier")).strip().upper()
 
     # Extract price and daily high/low
     current_price = 0.0
@@ -866,10 +882,25 @@ def generate_stock_recommendation(
 
     score = round(max(0.0, min(100.0, raw_score)), 1)
 
-    # Check for earnings blackout
+    # Check for earnings blackout and proximity
     is_blackout = False
+    earnings_days_away: Optional[int] = None
+    is_earnings_imminent = False
+
     if earnings_info:
         is_blackout = bool(earnings_info.get("is_blackout", False))
+        days = earnings_info.get("days_to_earnings")
+        if days is None:
+            days = earnings_info.get("earnings_days_away")
+        if days is not None:
+            try:
+                earnings_days_away = int(days)
+                if 0 <= earnings_days_away <= 7:
+                    is_earnings_imminent = True
+            except (ValueError, TypeError):
+                earnings_days_away = None
+        if bool(earnings_info.get("is_earnings_imminent", False)):
+            is_earnings_imminent = True
 
     # Action determination
     if is_blackout:
@@ -957,4 +988,8 @@ def generate_stock_recommendation(
         short_term_momentum_score=st_mom.short_term_momentum_score,
         short_term_setup=st_mom.short_term_setup,
         is_short_term_breakout=st_mom.is_short_term_breakout,
+        earnings_days_away=earnings_days_away,
+        is_earnings_imminent=is_earnings_imminent,
+        market_cap_tier=resolved_cap_tier,
+        is_earnings_blackout=is_blackout,
     )

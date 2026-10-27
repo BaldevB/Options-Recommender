@@ -117,6 +117,18 @@ def recommendation_to_dict(
             d["short_term_setup"] = str(d.get("short_term_setup", "MOMENTUM_CONSOLIDATION"))
         if "is_short_term_breakout" not in d:
             d["is_short_term_breakout"] = bool(d.get("is_short_term_breakout", False))
+        if "earnings_days_away" not in d:
+            d["earnings_days_away"] = d.get("days_to_earnings", None)
+        if "is_earnings_imminent" not in d:
+            d["is_earnings_imminent"] = bool(d.get("is_earnings_imminent", False))
+        if "market_cap_tier" not in d:
+            d["market_cap_tier"] = str(d.get("market_cap_tier", "LARGE")).upper()
+        if "is_earnings_blackout" not in d:
+            d["is_earnings_blackout"] = bool(d.get("is_blackout", False))
+        if "is_blackout" not in d:
+            d["is_blackout"] = bool(d.get("is_earnings_blackout", False))
+        if "risk_reward_ratio" not in d and "trade_plan" in d and isinstance(d["trade_plan"], dict):
+            d["risk_reward_ratio"] = d["trade_plan"].get("risk_reward_ratio", 1.5)
         return d
 
     plan = rec.trade_plan
@@ -166,6 +178,10 @@ def recommendation_to_dict(
     st_score = getattr(rec, "short_term_momentum_score", 50.0)
     st_setup = getattr(rec, "short_term_setup", "MOMENTUM_CONSOLIDATION")
     is_st_breakout = getattr(rec, "is_short_term_breakout", False)
+    earnings_days = getattr(rec, "earnings_days_away", None)
+    is_imminent = bool(getattr(rec, "is_earnings_imminent", False))
+    cap_tier = str(getattr(rec, "market_cap_tier", "LARGE")).upper()
+    is_blackout = bool(getattr(rec, "is_earnings_blackout", False))
 
     return {
         "symbol": rec.symbol,
@@ -203,6 +219,12 @@ def recommendation_to_dict(
         "short_term_momentum_score": round(float(st_score), 1),
         "short_term_setup": str(st_setup),
         "is_short_term_breakout": bool(is_st_breakout),
+        "risk_reward_ratio": round(float(plan.risk_reward_ratio), 2),
+        "earnings_days_away": earnings_days,
+        "is_earnings_imminent": bool(is_imminent),
+        "market_cap_tier": str(cap_tier),
+        "is_earnings_blackout": bool(is_blackout),
+        "is_blackout": bool(is_blackout),
     }
 
 
@@ -916,6 +938,11 @@ class StockScreenerCache:
         sort_by: str = "score",
         limit: int = 50,
         offset: int = 0,
+        strategy_preset: Optional[str] = None,
+        min_price: Optional[float] = None,
+        max_price: Optional[float] = None,
+        min_rr: Optional[float] = None,
+        exclude_earnings_blackout: bool = False,
     ) -> Dict[str, Any]:
         """Query, filter, sort, and paginate cached stock recommendations in sub-second time.
 
@@ -953,8 +980,9 @@ class StockScreenerCache:
         # Parse sector filter
         s_norm = normalize_sector_query(sector)
 
-        # Parse strategy filter
-        strat_norm = strategy.strip().lower() if strategy else None
+        # Parse strategy filter / preset
+        strat_query = strategy_preset or strategy
+        strat_norm = strat_query.strip().lower() if strat_query else None
         if strat_norm in ("all", "", "none"):
             strat_norm = None
 
@@ -992,31 +1020,31 @@ class StockScreenerCache:
                 ad_rating = str(item.get("accumulation_rating", "B")).upper()
                 ud_ratio = float(item.get("up_down_volume_ratio", 1.0))
 
-                if strat_norm in ("stage_2", "stage2", "stage_2_leaders", "minervini"):
-                    if not (is_s2 or tag == "stage_2_leader"):
+                if strat_norm in ("stage_2", "stage2", "stage_2_leaders", "stage_2_leader", "minervini"):
+                    if not (is_s2 or tag in ("stage_2_leader", "stage_2_leaders")):
                         continue
-                elif strat_norm in ("vcp", "vcp_squeeze", "squeeze", "tightness"):
-                    if not (is_vcp or tag == "vcp_squeeze" or tightness_val >= 65.0):
+                elif strat_norm in ("vcp", "vcp_squeeze", "vcp_squeezes", "squeeze", "tightness"):
+                    if not (is_vcp or tag in ("vcp_squeeze", "vcp_squeezes") or tightness_val >= 65.0):
                         continue
                 elif strat_norm in ("accumulation", "institutional_inflow", "inflow", "institutional"):
-                    if not (ad_rating in ("A+", "A") or tag == "institutional_inflow" or ud_ratio >= 1.25):
+                    if not (ad_rating in ("A+", "A") or tag in ("institutional_inflow", "accumulation") or ud_ratio >= 1.25):
                         continue
-                elif strat_norm in ("rs_leaders", "rs", "relative_strength"):
+                elif strat_norm in ("rs_leaders", "rs_leader", "rs", "relative_strength"):
                     if not (tag in ("rs_leader", "stage_2_leader") or rs >= 75.0):
                         continue
-                elif strat_norm in ("breakouts", "52w_breakouts", "breakout"):
-                    if not (tag == "52w_breakout" or d52 >= -7.0):
+                elif strat_norm in ("breakouts", "52w_breakouts", "52w_breakout", "breakout"):
+                    if not (tag in ("52w_breakout", "52w_breakouts") or d52 >= -7.0):
                         continue
                 elif strat_norm in ("golden_cross", "golden"):
                     if not (tag == "golden_cross" or "GOLDEN" in ma or "FULL_BULLISH" in ma or "BULLISH" in ma):
                         continue
-                elif strat_norm in ("pullback", "pullback_dips", "dip_buy", "dips"):
-                    if not (tag == "pullback_dip" or rsi_val <= 45.0):
+                elif strat_norm in ("pullback", "pullback_dip", "pullback_dips", "dip_buy", "dips"):
+                    if not (tag in ("pullback_dip", "pullback_dips") or rsi_val <= 45.0):
                         continue
                 elif strat_norm in ("velocity", "short_term_velocity", "velocity_breakout", "velocity_breakouts", "roc"):
                     roc3 = float(item.get("roc_3d", 0.0))
                     st_set = str(item.get("short_term_setup", "")).lower()
-                    if not (roc3 >= 2.5 or st_set in ("velocity_breakout", "ema_8_21_expansion") or tag == "velocity_breakout"):
+                    if not (roc3 >= 2.5 or st_set in ("velocity_breakout", "ema_8_21_expansion") or tag in ("velocity_breakout", "velocity_breakouts")) :
                         continue
                 elif strat_norm in ("rvol", "rvol_surge", "rvol_surges", "volume_surges"):
                     rvol = float(item.get("short_term_rvol", item.get("volume_ratio", 1.0)))
@@ -1032,7 +1060,35 @@ class StockScreenerCache:
                     if not bool(item.get("is_short_term_breakout", False)):
                         continue
 
-            # 4. Search query
+            # 4. Price range filter (min_price, max_price)
+            item_price = float(item.get("price") or item.get("trade_plan", {}).get("current_price", 0.0))
+            if min_price is not None and item_price < float(min_price):
+                continue
+            if max_price is not None and item_price > float(max_price):
+                continue
+
+            # 5. Min Risk-Reward ratio filter (min_rr)
+            if min_rr is not None:
+                rr_val = float(item.get("risk_reward_ratio") or item.get("trade_plan", {}).get("risk_reward_ratio", 0.0))
+                if rr_val < float(min_rr):
+                    continue
+
+            # 6. Exclude earnings blackout filter
+            if exclude_earnings_blackout:
+                is_blackout = bool(item.get("is_earnings_blackout") or item.get("is_blackout", False))
+                is_imminent = bool(item.get("is_earnings_imminent", False))
+                action_str = str(item.get("action", "")).upper()
+                days_away = item.get("earnings_days_away")
+                if is_blackout or is_imminent or "BLACKOUT" in action_str:
+                    continue
+                if days_away is not None:
+                    try:
+                        if 0 <= int(days_away) <= 7:
+                            continue
+                    except (ValueError, TypeError):
+                        pass
+
+            # 7. Search query
             if q_norm is not None:
                 sym_match = q_norm in item.get("symbol", "").lower()
                 name_match = q_norm in item.get("name", "").lower()
