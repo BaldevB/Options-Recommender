@@ -1061,7 +1061,7 @@ class StockScreenerCache:
                         continue
 
             # 4. Price range filter (min_price, max_price)
-            item_price = float(item.get("price") or item.get("trade_plan", {}).get("current_price", 0.0))
+            item_price = float(item.get("price") or (item.get("trade_plan") or {}).get("current_price", 0.0))
             if min_price is not None and item_price < float(min_price):
                 continue
             if max_price is not None and item_price > float(max_price):
@@ -1069,7 +1069,7 @@ class StockScreenerCache:
 
             # 5. Min Risk-Reward ratio filter (min_rr)
             if min_rr is not None:
-                rr_val = float(item.get("risk_reward_ratio") or item.get("trade_plan", {}).get("risk_reward_ratio", 0.0))
+                rr_val = float(item.get("risk_reward_ratio") or (item.get("trade_plan") or {}).get("risk_reward_ratio", 0.0))
                 if rr_val < float(min_rr):
                     continue
 
@@ -1124,7 +1124,7 @@ class StockScreenerCache:
         elif sort_field in ("confidence",):
             filtered.sort(key=lambda x: x.get("confidence", 0.0), reverse=True)
         elif sort_field in ("risk_reward", "risk_reward_ratio", "rr"):
-            filtered.sort(key=lambda x: x.get("trade_plan", {}).get("risk_reward_ratio", 1.5), reverse=True)
+            filtered.sort(key=lambda x: (x.get("trade_plan") or {}).get("risk_reward_ratio", 1.5), reverse=True)
         elif sort_field in ("target_pct", "target", "tp1_pct"):
             filtered.sort(key=lambda x: x.get("target_pct", 0.0), reverse=True)
         elif sort_field in ("rs", "relative_strength", "alpha", "rs_score"):

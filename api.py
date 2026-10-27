@@ -33,7 +33,8 @@ from config import (
     AppConfig, DEFAULT_CONFIG, WATCHLIST_CATEGORIES, EXPANDED_WATCHLIST,
     COMMODITIES_CATEGORIES, COMMODITIES_UNIVERSE,
     AI_STOCKS_CATEGORIES, AI_STOCKS_UNIVERSE,
-    HIGH_RISK_CATEGORIES, HIGH_RISK_UNIVERSE, ZERO_DTE_UNIVERSE
+    HIGH_RISK_CATEGORIES, HIGH_RISK_UNIVERSE, ZERO_DTE_UNIVERSE,
+    OptionsFilterConfig, RiskManagementConfig
 )
 from data.price_data import get_price_history, get_current_quote, get_earnings_info, get_candles_data, DEFAULT_TIMEFRAME_PERIODS
 from data.news_data import get_company_news
@@ -1480,6 +1481,226 @@ def _get_curated_options_recommendations() -> List[Dict[str, Any]]:
             ],
         },
     ]
+
+
+
+@app.get("/api/options/recommend")
+def get_options_recommend_for_ticker(
+    ticker: Optional[str] = None,
+    symbol: Optional[str] = None,
+    bias: Optional[str] = None,
+    min_dte: int = 14,
+    max_dte: int = 45,
+    equity: float = 10000.0,
+    risk_pct: float = 1.0,
+):
+    """Dynamic on-demand options recommendation endpoint for any US stock.
+
+    Synthesizes live Delta-targeted (0.40?0.50) options recommendations, vertical
+    debit spreads, and asymmetric lotto setups on demand for any ticker.
+    """
+    sym = (ticker or symbol or "").strip().upper()
+    if not sym:
+        raise HTTPException(status_code=400, detail="Ticker or symbol query parameter is required.")
+
+    quote = get_current_quote(sym)
+    stock_price = float(quote.get("current_price", 0.0)) if quote else 0.0
+    if not quote or not quote.get("valid") and stock_price <= 0:
+        raise HTTPException(status_code=404, detail=f"Stock quote not found for ticker: {sym}")
+
+    # Fetch options chains
+    calls_df, puts_df, target_exps = get_options_chains(sym, min_dte=min_dte, max_dte=max_dte)
+    if (calls_df is None or calls_df.empty) and (puts_df is None or puts_df.empty):
+        raise HTTPException(status_code=404, detail=f"No options chains available for {sym}")
+
+    # Determine directional bias
+    bias_clean = (bias or "").strip().upper()
+    if bias_clean in ("BULLISH", "BULL", "CALL"):
+        direction = BiasDirection.BULLISH
+    elif bias_clean in ("BEARISH", "BEAR", "PUT"):
+        direction = BiasDirection.BEARISH
+    else:
+        # Derive bias from price history momentum + news sentiment
+        direction = BiasDirection.BULLISH
+        try:
+            hist = get_price_history(sym, period="3mo")
+            if hist is not None and not hist.empty and len(hist) >= 10:
+                momentum = analyze_momentum(hist, sym)
+                sentiment = None
+                try:
+                    news_articles = get_company_news(sym, limit=5)
+                    sentiment = analyze_news_sentiment(news_articles, sym)
+                except Exception:
+                    pass
+                derived_sig = generate_signal(momentum, sentiment)
+                if derived_sig.bias in (BiasDirection.BULLISH, BiasDirection.BEARISH):
+                    direction = derived_sig.bias
+                elif momentum.momentum_score < 0:
+                    direction = BiasDirection.BEARISH
+        except Exception as exc:
+            logger.debug("Error deriving signal bias for %s: %s", sym, exc)
+
+    signal = TradeSignal(
+        symbol=sym,
+        bias=direction,
+        combined_score=0.8 if direction == BiasDirection.BULLISH else -0.8,
+        confidence=0.85,
+        confidence_tier=ConfidenceTier.HIGH,
+        momentum_score=0.6 if direction == BiasDirection.BULLISH else -0.6,
+        sentiment_score=0.0,
+        is_earnings_blackout=False,
+        rationale=[f"Targeted directional bias: {direction.value}"],
+    )
+
+    risk_cfg = RiskManagementConfig(
+        account_equity=equity,
+        max_risk_pct=(risk_pct / 100.0 if risk_pct > 0.05 else risk_pct),
+        stop_loss_pct=0.50,
+    )
+    filter_cfg = OptionsFilterConfig(
+        min_dte=min_dte,
+        max_dte=max_dte,
+        min_delta=0.30,
+        max_delta=0.55,
+        target_delta=0.45,
+    )
+    high_risk_cfg = DEFAULT_CONFIG.high_risk_filter
+
+    screening = suggest_options(
+        signal=signal,
+        spot_price=stock_price,
+        calls_df=calls_df,
+        puts_df=puts_df,
+        filter_cfg=filter_cfg,
+        risk_cfg=risk_cfg,
+        high_risk_cfg=high_risk_cfg,
+    )
+
+    single_leg = None
+    if screening.single_leg_suggestions:
+        s = screening.single_leg_suggestions[0]
+        t_plan = format_trade_plan_dict(s.trade_plan)
+        pop_pct = t_plan.get("metrics", {}).get("pop_pct", 50.0) if t_plan else 50.0
+        single_leg = {
+            "contract": s.contract_symbol,
+            "contract_symbol": s.contract_symbol,
+            "type": s.option_type,
+            "option_type": s.option_type,
+            "strike": s.strike,
+            "delta": s.delta,
+            "gamma": getattr(s, "gamma", 0.0),
+            "theta": getattr(s, "theta", 0.0),
+            "vega": getattr(s, "vega", 0.0),
+            "greeks": {
+                "delta": s.delta,
+                "gamma": getattr(s, "gamma", 0.0),
+                "theta": getattr(s, "theta", 0.0),
+                "vega": getattr(s, "vega", 0.0),
+            },
+            "expiration": s.expiration,
+            "dte": s.dte,
+            "bid": s.bid,
+            "ask": s.ask,
+            "mid": s.mid_price,
+            "mid_price": s.mid_price,
+            "breakeven": s.breakeven_price,
+            "breakeven_price": s.breakeven_price,
+            "req_move_pct": s.required_move_pct,
+            "pop_pct": pop_pct,
+            "probability_of_profit_pct": pop_pct,
+            "volume": s.volume,
+            "open_interest": s.open_interest,
+            "iv_pct": s.implied_volatility_pct,
+            "implied_volatility_pct": s.implied_volatility_pct,
+            "suggested_contracts": s.suggested_contracts,
+            "total_dollar_risk": s.total_dollar_risk,
+            "stop_loss_price": s.suggested_stop_loss_price,
+            "stop_loss_dollar": s.stop_loss_dollar_risk,
+            "rank_score": s.rank_score,
+            "warnings": s.risk_warnings,
+            "trade_plan": t_plan,
+        }
+
+    vertical_spread = None
+    if screening.spread_suggestions:
+        spd = screening.spread_suggestions[0]
+        vertical_spread = {
+            "type": spd.spread_type,
+            "spread_type": spd.spread_type,
+            "expiration": spd.expiration,
+            "dte": spd.dte,
+            "long_contract": spd.long_contract,
+            "long_strike": spd.long_strike,
+            "long_ask": spd.long_ask,
+            "long_delta": spd.long_delta,
+            "short_contract": spd.short_contract,
+            "short_strike": spd.short_strike,
+            "short_bid": spd.short_bid,
+            "short_delta": spd.short_delta,
+            "net_debit": spd.net_debit,
+            "max_loss": spd.max_loss_per_contract,
+            "max_loss_per_contract": spd.max_loss_per_contract,
+            "max_profit": spd.max_profit_per_contract,
+            "max_profit_per_contract": spd.max_profit_per_contract,
+            "breakeven": spd.breakeven_price,
+            "breakeven_price": spd.breakeven_price,
+            "risk_reward_ratio": spd.risk_reward_ratio,
+            "rr": spd.risk_reward_ratio,
+            "suggested_contracts": spd.suggested_contracts,
+            "total_dollar_risk": spd.total_dollar_risk,
+            "notes": getattr(spd, "spread_notes", ""),
+            "trade_plan": getattr(spd, "trade_plan", None),
+        }
+
+    moonshot_setup = None
+    hr = screening.high_risk_setup
+    if hr:
+        ls = getattr(hr, "lotto_spread", None)
+        moonshot_setup = {
+            "setup_name": hr.setup_name,
+            "contract": hr.contract_symbol,
+            "type": hr.option_type,
+            "strike": hr.strike,
+            "delta": hr.delta,
+            "expiration": hr.expiration,
+            "dte": hr.dte,
+            "bid": hr.bid,
+            "ask": hr.ask,
+            "moneyness_pct": hr.moneyness_pct,
+            "breakeven": hr.breakeven_price,
+            "req_move_pct": hr.required_move_pct,
+            "upside_leverage": hr.upside_leverage,
+            "suggested_contracts": hr.suggested_contracts,
+            "total_dollar_risk": hr.total_dollar_risk,
+            "lotto_spread": {
+                "type": ls.spread_type,
+                "expiration": ls.expiration,
+                "dte": ls.dte,
+                "long_strike": ls.long_strike,
+                "short_strike": ls.short_strike,
+                "net_debit": ls.net_debit,
+                "max_profit": ls.max_profit_per_contract,
+                "risk_reward_ratio": ls.risk_reward_ratio,
+                "notes": getattr(ls, "spread_notes", ""),
+                "trade_plan": getattr(ls, "trade_plan", None),
+            } if ls else None,
+            "warnings": hr.risk_warnings,
+            "trade_plan": hr.trade_plan,
+        }
+
+    result = {
+        "symbol": sym,
+        "stock_price": round(stock_price, 2),
+        "bias": direction.value,
+        "has_options": True,
+        "single_leg": single_leg,
+        "vertical_spread": vertical_spread,
+        "moonshot_setup": moonshot_setup,
+        "elevated_iv": bool(screening.elevated_iv),
+        "avg_iv_pct": float(screening.avg_iv_pct),
+        "audit_log": screening.audit_log,
+    }
+    return sanitize_json(result)
 
 
 @app.get("/api/options/recommendations")
