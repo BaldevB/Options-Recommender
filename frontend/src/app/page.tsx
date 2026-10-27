@@ -59,6 +59,7 @@ import MarketRibbon from "@/components/MarketRibbon";
 import StarredWatchlistView from "@/components/StarredWatchlistView";
 import VolatilityCockpit from "@/components/VolatilityCockpit";
 import MultiLegStrategyBuilder from "@/components/MultiLegStrategyBuilder";
+import { addOrConsolidatePosition, PaperTradePosition } from "@/utils/paperSettlement";
 
 const PaperTradingTracker = dynamic(() => import("@/components/PaperTradingTracker"), {
   ssr: false,
@@ -224,7 +225,7 @@ export default function Home() {
       const strikeFormatted = String(Math.round((opt.strike || 100) * 1000)).padStart(8, "0");
       const contractSym = opt.contract || `${sym}${expClean}${type[0]}${strikeFormatted}`;
 
-      const newPos = {
+      const newPos: PaperTradePosition = {
         id: `pos-${Date.now()}`,
         ticker: sym,
         contract: contractSym,
@@ -243,10 +244,21 @@ export default function Home() {
         notes: opt.notes || `Simulated execution from ${notePrefix}`,
       };
 
-      localStorage.setItem("options_paper_positions", JSON.stringify([newPos, ...positions]));
+      const { updatedPositions, consolidated, totalQty, weightedPrice } = addOrConsolidatePosition(
+        positions,
+        newPos
+      );
+
+      localStorage.setItem("options_paper_positions", JSON.stringify(updatedPositions));
       localStorage.setItem("options_paper_balance", (balance - cost).toString());
+      const toastMessage = consolidated
+        ? `Consolidated into existing position: now holding ${totalQty}x ${sym} $${opt.strike} ${type} (avg entry $${weightedPrice.toFixed(2)})!`
+        : opt.isSpread
+        ? `Filled ${qty}x ${contractSym} @ $${askPx.toFixed(2)} ($${cost.toFixed(2)} total debit). Added to Paper Portfolio!`
+        : `Filled ${qty}x ${sym} $${opt.strike} ${type} @ $${askPx.toFixed(2)} ($${cost.toFixed(2)} total cost). Added to Paper Portfolio!`;
+
       setPaperToast({
-        message: opt.isSpread ? `Filled ${qty}x ${contractSym} @ $${askPx.toFixed(2)} ($${cost.toFixed(2)} total debit). Added to Paper Portfolio!` : `Filled ${qty}x ${sym} $${opt.strike} ${type} @ $${askPx.toFixed(2)} ($${cost.toFixed(2)} total cost). Added to Paper Portfolio!`,
+        message: toastMessage,
         id: Date.now(),
       });
     } catch (err) {

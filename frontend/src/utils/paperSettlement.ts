@@ -54,6 +54,14 @@ export interface SettlementSummary {
   summaryMessage: string | null;
 }
 
+export interface ConsolidatePositionResult {
+  updatedPositions: PaperTradePosition[];
+  consolidated: boolean;
+  totalQty: number;
+  weightedPrice: number;
+  existingId?: string;
+}
+
 /**
  * Check whether an expiration date (YYYY-MM-DD) has reached or passed 4:00 PM US Eastern Time.
  */
@@ -341,4 +349,189 @@ export function settleSinglePosition(
     totalPayout: calc.payout,
     summaryMessage: message,
   };
+}
+
+/**
+ * Returns a canonical consolidation key for matching duplicate open positions.
+ */
+export function getPositionConsolidationKey(p: Partial<PaperTradePosition>): string {
+  const ticker = (p.ticker || "").trim().toUpperCase();
+  const isStock = p.assetType === "STOCK" || p.optionType === "STOCK" || p.multiplier === 1;
+  if (isStock) {
+    return `STOCK:${ticker}`;
+  }
+
+  let optType = (p.optionType || "").trim().toUpperCase();
+  let strikeNum = p.strike !== undefined ? Number(p.strike) : undefined;
+  let exp = (p.expiration || "").trim().slice(0, 10);
+
+  // If missing fields, attempt parsing from contract symbol
+  if (p.contract) {
+    const rawContract = p.contract.trim().toUpperCase();
+    if (rawContract.includes("SPREAD") || rawContract.includes("DEBIT") || rawContract.includes("CREDIT")) {
+      return `SPREAD:${ticker}:${rawContract}:${exp}`;
+    }
+
+    const occMatch = rawContract.match(/^([A-Z]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/);
+    if (occMatch) {
+      if (!optType) optType = occMatch[5] === "C" ? "CALL" : "PUT";
+      if (!exp || exp === "EQUITY") {
+        exp = `20${occMatch[2]}-${occMatch[3]}-${occMatch[4]}`;
+      }
+      if (strikeNum === undefined || isNaN(strikeNum)) {
+        strikeNum = parseInt(occMatch[6], 10) / 1000;
+      }
+    }
+  }
+
+  const strikeStr = strikeNum !== undefined && !isNaN(strikeNum) ? strikeNum.toFixed(2) : "0.00";
+  return `OPTION:${ticker}:${optType || "CALL"}:${strikeStr}:${exp}`;
+}
+
+/**
+ * Merges an incoming buy into an existing OPEN position if one matches,
+ * accumulating contract/share count and computing the weighted average entry price.
+ * If no matching open position is found, prepends the new position.
+ */
+export function addOrConsolidatePosition(
+  existingPositions: PaperTradePosition[],
+  newPos: PaperTradePosition
+): ConsolidatePositionResult {
+  const isStock = newPos.assetType === "STOCK" || newPos.optionType === "STOCK" || newPos.multiplier === 1;
+  const newKey = getPositionConsolidationKey(newPos);
+
+  const existingIndex = existingPositions.findIndex(
+    (p) => p.status === "OPEN" && getPositionConsolidationKey(p) === newKey
+  );
+
+  if (existingIndex === -1) {
+    return {
+      updatedPositions: [newPos, ...existingPositions],
+      consolidated: false,
+      totalQty: isStock ? (newPos.shares || newPos.contracts || 1) : newPos.contracts,
+      weightedPrice: newPos.entryPrice,
+    };
+  }
+
+  const existing = existingPositions[existingIndex];
+  let totalQty = 0;
+  let weightedPrice = 0;
+  const newTotalCost = Number((existing.totalCost + newPos.totalCost).toFixed(2));
+
+  let merged: PaperTradePosition;
+
+  if (isStock) {
+    const existingShares = existing.shares || existing.contracts || 1;
+    const addedShares = newPos.shares || newPos.contracts || 1;
+    totalQty = existingShares + addedShares;
+    weightedPrice = totalQty > 0 ? Number((newTotalCost / totalQty).toFixed(4)) : newPos.entryPrice;
+
+    merged = {
+      ...existing,
+      shares: totalQty,
+      contracts: totalQty,
+      totalCost: newTotalCost,
+      entryPrice: weightedPrice,
+      currentPrice: newPos.currentPrice || newPos.entryPrice || existing.currentPrice,
+      targetProfitPrice: newPos.targetProfitPrice || existing.targetProfitPrice,
+      stopLossPrice: newPos.stopLossPrice || existing.stopLossPrice,
+      notes: `${existing.notes ? `${existing.notes} | ` : ""}Added ${addedShares} sh @ $${newPos.entryPrice.toFixed(2)}`,
+    };
+  } else {
+    const existingContracts = existing.contracts > 0 ? existing.contracts : 1;
+    const addedContracts = newPos.contracts > 0 ? newPos.contracts : 1;
+    totalQty = existingContracts + addedContracts;
+    weightedPrice = totalQty > 0 ? Number((newTotalCost / (totalQty * 100)).toFixed(4)) : newPos.entryPrice;
+
+    merged = {
+      ...existing,
+      contracts: totalQty,
+      totalCost: newTotalCost,
+      entryPrice: weightedPrice,
+      currentPrice: newPos.currentPrice || newPos.entryPrice || existing.currentPrice,
+      targetProfitPrice: newPos.targetProfitPrice || existing.targetProfitPrice,
+      stopLossPrice: newPos.stopLossPrice || existing.stopLossPrice,
+      notes: `${existing.notes ? `${existing.notes} | ` : ""}Added ${addedContracts}x @ $${newPos.entryPrice.toFixed(2)}`,
+    };
+  }
+
+  const updatedPositions = [...existingPositions];
+  updatedPositions[existingIndex] = merged;
+
+  return {
+    updatedPositions,
+    consolidated: true,
+    totalQty,
+    weightedPrice,
+    existingId: existing.id,
+  };
+}
+
+/**
+ * Scans an array of positions and consolidates any duplicate OPEN positions into
+ * single rows with weighted average entry price. Preserves CLOSED positions as distinct records.
+ */
+export function consolidateOpenPositions(
+  positions: PaperTradePosition[]
+): { consolidatedPositions: PaperTradePosition[]; hasChanges: boolean } {
+  let hasChanges = false;
+  const result: PaperTradePosition[] = [];
+  const openKeyToIndex = new Map<string, number>();
+
+  for (const pos of positions) {
+    if (pos.status !== "OPEN") {
+      result.push(pos);
+      continue;
+    }
+
+    const key = getPositionConsolidationKey(pos);
+    if (!openKeyToIndex.has(key)) {
+      openKeyToIndex.set(key, result.length);
+      result.push({ ...pos });
+    } else {
+      hasChanges = true;
+      const targetIdx = openKeyToIndex.get(key)!;
+      const existing = result[targetIdx];
+      const isStock = pos.assetType === "STOCK" || pos.optionType === "STOCK" || pos.multiplier === 1;
+
+      const combinedCost = Number((existing.totalCost + pos.totalCost).toFixed(2));
+
+      if (isStock) {
+        const existingShares = existing.shares || existing.contracts || 1;
+        const addShares = pos.shares || pos.contracts || 1;
+        const totalShares = existingShares + addShares;
+        const avgPrice = totalShares > 0 ? Number((combinedCost / totalShares).toFixed(4)) : pos.entryPrice;
+
+        result[targetIdx] = {
+          ...existing,
+          shares: totalShares,
+          contracts: totalShares,
+          totalCost: combinedCost,
+          entryPrice: avgPrice,
+          currentPrice: pos.currentPrice || existing.currentPrice,
+          targetProfitPrice: pos.targetProfitPrice || existing.targetProfitPrice,
+          stopLossPrice: pos.stopLossPrice || existing.stopLossPrice,
+          notes: `${existing.notes ? `${existing.notes} | ` : ""}Merged ${addShares} sh @ $${pos.entryPrice.toFixed(2)}`,
+        };
+      } else {
+        const existingContracts = existing.contracts > 0 ? existing.contracts : 1;
+        const addContracts = pos.contracts > 0 ? pos.contracts : 1;
+        const totalContracts = existingContracts + addContracts;
+        const avgPrice = totalContracts > 0 ? Number((combinedCost / (totalContracts * 100)).toFixed(4)) : pos.entryPrice;
+
+        result[targetIdx] = {
+          ...existing,
+          contracts: totalContracts,
+          totalCost: combinedCost,
+          entryPrice: avgPrice,
+          currentPrice: pos.currentPrice || existing.currentPrice,
+          targetProfitPrice: pos.targetProfitPrice || existing.targetProfitPrice,
+          stopLossPrice: pos.stopLossPrice || existing.stopLossPrice,
+          notes: `${existing.notes ? `${existing.notes} | ` : ""}Merged ${addContracts}x @ $${pos.entryPrice.toFixed(2)}`,
+        };
+      }
+    }
+  }
+
+  return { consolidatedPositions: result, hasChanges };
 }

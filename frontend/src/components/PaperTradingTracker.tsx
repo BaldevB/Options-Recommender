@@ -34,6 +34,8 @@ import {
   calculateOptionSettlement,
   settleExpiredPositions,
   settleSinglePosition,
+  addOrConsolidatePosition,
+  consolidateOpenPositions,
 } from "../utils/paperSettlement";
 
 export type { PaperTradePosition };
@@ -134,7 +136,12 @@ export default function PaperTradingTracker({
         if (savedPositions) {
           const parsed = JSON.parse(savedPositions);
           if (Array.isArray(parsed)) {
-            const autoSettle = settleExpiredPositions(parsed, initialCash);
+            const { consolidatedPositions, hasChanges } = consolidateOpenPositions(parsed);
+            let activePositions = consolidatedPositions;
+            if (hasChanges) {
+              localStorage.setItem(STORAGE_KEY_POSITIONS, JSON.stringify(consolidatedPositions));
+            }
+            const autoSettle = settleExpiredPositions(activePositions, initialCash);
             if (autoSettle.settledCount > 0) {
               setPositions(autoSettle.updatedPositions);
               setCashBalance(autoSettle.newCashBalance);
@@ -142,7 +149,7 @@ export default function PaperTradingTracker({
               localStorage.setItem(STORAGE_KEY_BALANCE, autoSettle.newCashBalance.toString());
               setExpiryNotice(autoSettle.summaryMessage);
             } else {
-              setPositions(parsed);
+              setPositions(activePositions);
             }
           }
         }
@@ -417,9 +424,17 @@ export default function PaperTradingTracker({
       notes: formNotes,
     };
 
-    const nextPositions = [newPosition, ...positions];
-    savePositions(nextPositions);
+    const { updatedPositions, consolidated, totalQty, weightedPrice } = addOrConsolidatePosition(
+      positions,
+      newPosition
+    );
+    savePositions(updatedPositions);
     saveBalance(cashBalance - cost);
+    if (consolidated) {
+      setExpiryNotice(
+        `Consolidated into existing position: now holding ${totalQty}x ${formTicker} $${formStrike} ${formType} (avg entry $${weightedPrice.toFixed(2)}).`
+      );
+    }
     setActiveSubTab("open");
   };
 

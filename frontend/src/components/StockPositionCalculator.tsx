@@ -14,6 +14,7 @@ import {
   Scale,
 } from "lucide-react";
 import { StockRecommendationItem } from "./StockCard";
+import { addOrConsolidatePosition, PaperTradePosition } from "../utils/paperSettlement";
 
 interface StockPositionCalculatorProps {
   stock: StockRecommendationItem;
@@ -132,7 +133,7 @@ export default function StockPositionCalculator({
       const savedPositionsStr = localStorage.getItem(STORAGE_KEY_POSITIONS);
       const positions = savedPositionsStr ? JSON.parse(savedPositionsStr) : [];
 
-      const newPos = {
+      const newPos: PaperTradePosition = {
         id: `stock-${Date.now()}`,
         ticker: stock.symbol.toUpperCase(),
         contract: stock.symbol.toUpperCase(),
@@ -154,9 +155,14 @@ export default function StockPositionCalculator({
         notes: `Simulated Stock Buy: ${calculations.actualShares} shares @ $${entryPrice.toFixed(2)} (${stock.horizon || "SWING"})`,
       };
 
+      const { updatedPositions, consolidated, totalQty, weightedPrice } = addOrConsolidatePosition(
+        positions,
+        newPos
+      );
+
       const updatedBalance = Math.max(0, balance - calculations.totalCost);
 
-      localStorage.setItem(STORAGE_KEY_POSITIONS, JSON.stringify([newPos, ...positions]));
+      localStorage.setItem(STORAGE_KEY_POSITIONS, JSON.stringify(updatedPositions));
       localStorage.setItem(STORAGE_KEY_BALANCE, updatedBalance.toString());
 
       setBalance(updatedBalance);

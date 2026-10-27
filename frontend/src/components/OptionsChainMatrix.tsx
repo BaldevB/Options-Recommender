@@ -21,6 +21,7 @@ import {
 const PayoffChart = dynamic(() => import("@/components/PayoffChart"), {
   ssr: false,
 });
+import { addOrConsolidatePosition, PaperTradePosition } from "../utils/paperSettlement";
 
 interface OptionsChainMatrixProps {
   ticker: string;
@@ -182,7 +183,7 @@ useEffect(() => {
       }
       const savedStr = localStorage.getItem("options_paper_positions");
       const positions = savedStr ? JSON.parse(savedStr) : [];
-      const newPos = {
+      const newPos: PaperTradePosition = {
         id: `pos-${Date.now()}`,
         ticker: ticker.toUpperCase(),
         contract: inspectedOption.contract,
@@ -200,9 +201,16 @@ useEffect(() => {
         stopLossPrice: askPx * 0.5,
         notes: "Executed from Chain Matrix Inspector",
       };
-      localStorage.setItem("options_paper_positions", JSON.stringify([newPos, ...positions]));
+      const { updatedPositions, consolidated, totalQty, weightedPrice } = addOrConsolidatePosition(
+        positions,
+        newPos
+      );
+      localStorage.setItem("options_paper_positions", JSON.stringify(updatedPositions));
       localStorage.setItem("options_paper_balance", (balance - cost).toString());
-      setChainPaperToast(`Bought ${chainContracts}x ${ticker} $${inspectedOption.strike} ${inspectedOption.type} for $${cost.toFixed(2)}!`);
+      const toastMsg = consolidated
+        ? `Consolidated into existing position: now holding ${totalQty}x ${ticker} $${inspectedOption.strike} ${inspectedOption.type} (avg entry $${weightedPrice.toFixed(2)})!`
+        : `Bought ${chainContracts}x ${ticker} $${inspectedOption.strike} ${inspectedOption.type} for $${cost.toFixed(2)}!`;
+      setChainPaperToast(toastMsg);
       setTimeout(() => setChainPaperToast(null), 4000);
     } catch (e) {
       console.error(e);

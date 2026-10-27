@@ -25,6 +25,7 @@ import {
   isOptionExpired,
   settleExpiredPositions,
   settleSinglePosition,
+  consolidateOpenPositions,
 } from "../utils/paperSettlement";
 
 export type { PaperTradePosition };
@@ -68,8 +69,14 @@ export default function StockPaperTradingDrawer({
       if (savedPositions) {
         const parsed = JSON.parse(savedPositions);
         if (Array.isArray(parsed)) {
+          const { consolidatedPositions, hasChanges } = consolidateOpenPositions(parsed);
+          let activePositions = consolidatedPositions;
+          if (hasChanges) {
+            localStorage.setItem(STORAGE_KEY_POSITIONS, JSON.stringify(consolidatedPositions));
+          }
+
           let curCash = savedBalance ? parseFloat(savedBalance) : DEFAULT_STARTING_CASH;
-          const autoSettle = settleExpiredPositions(parsed, curCash);
+          const autoSettle = settleExpiredPositions(activePositions, curCash);
           if (autoSettle.settledCount > 0) {
             setPositions(autoSettle.updatedPositions);
             setCashBalance(autoSettle.newCashBalance);
@@ -77,7 +84,7 @@ export default function StockPaperTradingDrawer({
             localStorage.setItem(STORAGE_KEY_BALANCE, autoSettle.newCashBalance.toString());
             setFeedbackMessage(autoSettle.summaryMessage);
           } else {
-            setPositions(parsed);
+            setPositions(activePositions);
           }
         }
       }
