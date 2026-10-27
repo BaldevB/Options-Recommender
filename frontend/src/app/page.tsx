@@ -204,7 +204,7 @@ export default function Home() {
       const savedBalanceStr = localStorage.getItem("options_paper_balance");
       const balance = savedBalanceStr ? parseFloat(savedBalanceStr) : 10000;
       const qty = Math.max(1, customContracts ?? opt.suggested_contracts ?? opt.contracts ?? 1);
-      const askPx = opt.ask || opt.price || 1;
+      const askPx = opt.net_debit ?? opt.ask ?? opt.price ?? 1;
       const cost = askPx * 100 * qty;
       if (cost > balance) {
         alert(
@@ -235,13 +235,13 @@ export default function Home() {
         status: "OPEN",
         targetProfitPrice: opt.trade_plan?.profit_targets?.[0]?.contract_price,
         stopLossPrice: opt.stop_loss_price,
-        notes: `Simulated execution from ${notePrefix}`,
+        notes: opt.notes || `Simulated execution from ${notePrefix}`,
       };
 
       localStorage.setItem("options_paper_positions", JSON.stringify([newPos, ...positions]));
       localStorage.setItem("options_paper_balance", (balance - cost).toString());
       setPaperToast({
-        message: `Filled ${qty}x ${sym} $${opt.strike} ${type} @ $${askPx.toFixed(2)} ($${cost.toFixed(2)} total cost). Added to Paper Portfolio!`,
+        message: opt.isSpread ? `Filled ${qty}x ${contractSym} @ $${askPx.toFixed(2)} ($${cost.toFixed(2)} total debit). Added to Paper Portfolio!` : `Filled ${qty}x ${sym} $${opt.strike} ${type} @ $${askPx.toFixed(2)} ($${cost.toFixed(2)} total cost). Added to Paper Portfolio!`,
         id: Date.now(),
       });
     } catch (err) {
@@ -805,7 +805,7 @@ export default function Home() {
                 rec.symbol,
                 rec.option_type,
                 rec.suggested_contracts,
-                `Best Options (${rec.strategy_label})`
+                rec.isSpread ? rec.strategy_label : `Best Options (${rec.strategy_label})`
               );
             }}
             starredTickers={starredTickers}

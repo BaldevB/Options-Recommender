@@ -28,7 +28,14 @@ import {
   DollarSign,
   ChevronRight,
   Info,
+  LineChart,
 } from "lucide-react";
+
+import OptionPayoffModal, {
+  getSpreadAlternative,
+  getThetaCliffInfo,
+  SpreadData,
+} from "./OptionPayoffModal";
 
 export interface OptionRecommendation {
   id: string;
@@ -69,12 +76,13 @@ export interface OptionRecommendation {
   sector: string;
   sector_label: string;
   rationale: string[];
+  vertical_spread?: SpreadData;
 }
 
 interface BestOptionsHomeProps {
   onSelectTicker: (symbol: string) => void;
   onOpenChain: (symbol: string) => void;
-  onPaperBuy: (rec: OptionRecommendation) => void;
+  onPaperBuy: (rec: any) => void;
   starredTickers: string[];
   onToggleStar: (symbol: string) => void;
 }
@@ -103,6 +111,62 @@ export default function BestOptionsHome({
   const [sortBy, setSortBy] = useState<string>("score");
   const [viewMode, setViewMode] = useState<"grid" | "table">("grid");
   const [boughtMap, setBoughtMap] = useState<Record<string, boolean>>({});
+
+  // Card view state: Single Leg vs Spread toggle per card
+  const [cardModes, setCardModes] = useState<Record<string, "SINGLE" | "SPREAD">>({});
+
+  // Interactive Payoff Modal state
+  const [selectedPayoffRec, setSelectedPayoffRec] = useState<OptionRecommendation | null>(null);
+  const [payoffInitialMode, setPayoffInitialMode] = useState<"SINGLE" | "SPREAD">("SINGLE");
+
+  // Active Paper Trading Positions sync
+  const [activePaperPositions, setActivePaperPositions] = useState<any[]>([]);
+
+  const syncPaperPositions = () => {
+    try {
+      if (typeof window === "undefined") return;
+      const raw = localStorage.getItem("options_paper_positions");
+      if (!raw) {
+        setActivePaperPositions([]);
+        return;
+      }
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        setActivePaperPositions(parsed.filter((p: any) => p.status === "OPEN"));
+      }
+    } catch (e) {
+      console.error("Failed to parse options_paper_positions:", e);
+    }
+  };
+
+  useEffect(() => {
+    syncPaperPositions();
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === "options_paper_positions") {
+        syncPaperPositions();
+      }
+    };
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
+  }, []);
+
+  const isPositionInPaper = (rec: OptionRecommendation) => {
+    return activePaperPositions.some((p: any) => {
+      if (p.contract && rec.contract && p.contract === rec.contract) return true;
+      if (
+        p.ticker === rec.symbol &&
+        p.strike === rec.strike &&
+        p.optionType === rec.option_type
+      )
+        return true;
+      return false;
+    });
+  };
+
+  const openPayoffModal = (rec: OptionRecommendation, mode: "SINGLE" | "SPREAD" = "SINGLE") => {
+    setSelectedPayoffRec(rec);
+    setPayoffInitialMode(mode);
+  };
 
   const fetchRecommendations = async () => {
     setLoading(true);
@@ -140,9 +204,32 @@ export default function BestOptionsHome({
     fetchRecommendations();
   };
 
-  const handlePaperBuyClick = (rec: OptionRecommendation) => {
-    onPaperBuy(rec);
+  const handlePaperBuyClick = (rec: OptionRecommendation, spread?: SpreadData | null) => {
+    const isSpreadMode = (cardModes[rec.id] || "SINGLE") === "SPREAD";
+    if (isSpreadMode && spread) {
+      onPaperBuy({
+        symbol: rec.symbol,
+        contract: `${rec.symbol} ${spread.spread_type} ${spread.long_strike}/${spread.short_strike}`,
+        strike: spread.long_strike,
+        option_type: rec.option_type,
+        expiration: rec.expiration,
+        dte: rec.dte,
+        ask: spread.net_debit,
+        net_debit: spread.net_debit,
+        isSpread: true,
+        spread_type: spread.spread_type,
+        suggested_contracts: spread.suggested_contracts || 1,
+        strategy_label: spread.spread_label,
+        notes: `Defined-Risk Vertical Spread (${spread.spread_label}): Long $${spread.long_strike} / Short $${spread.short_strike}`,
+      });
+    } else {
+      onPaperBuy(rec);
+    }
+
     setBoughtMap((prev) => ({ ...prev, [rec.id]: true }));
+    setTimeout(() => {
+      syncPaperPositions();
+    }, 250);
     setTimeout(() => {
       setBoughtMap((prev) => ({ ...prev, [rec.id]: false }));
     }, 3000);
@@ -449,15 +536,20 @@ export default function BestOptionsHome({
             const isStar = starredTickers.includes(rec.symbol);
             const isBought = boughtMap[rec.id];
 
+            const currentMode = cardModes[rec.id] || "SINGLE";
+            const spread = getSpreadAlternative(rec);
+            const thetaInfo = getThetaCliffInfo(rec.dte, rec.theta);
+            const isPaperActive = isPositionInPaper(rec);
+
             return (
               <div
                 key={rec.id}
                 className="group relative flex flex-col justify-between rounded-2xl border border-slate-800 bg-[#0a1120] p-5 shadow-lg transition-all duration-200 hover:border-cyan-500/40 hover:shadow-[0_0_20px_rgba(6,182,212,0.15)]"
               >
-                {/* Card Header: Stock info & Category badge */}
                 <div>
-                  <div className="flex items-start justify-between gap-2 mb-3">
-                    <div className="flex items-center space-x-2.5">
+                  {/* Card Header: Stock info & Category badge & Paper Active Badge */}
+                  <div className="flex items-start justify-between gap-2 mb-2.5">
+                    <div className="flex items-center space-x-2">
                       <button
                         onClick={() => onSelectTicker(rec.symbol)}
                         className="text-lg font-black text-white hover:text-cyan-400 transition"
@@ -472,11 +564,23 @@ export default function BestOptionsHome({
                       >
                         <Star className={`h-4 w-4 ${isStar ? "fill-amber-400 text-amber-400" : ""}`} />
                       </button>
-                      <span className="text-xs text-slate-400 truncate max-w-[120px] sm:max-w-[150px]">
+                      <span className="text-xs text-slate-400 truncate max-w-[100px] sm:max-w-[130px]">
                         {rec.name}
                       </span>
                     </div>
-                    {getCategoryBadge(rec.strategy_category)}
+
+                    <div className="flex items-center space-x-1.5 shrink-0">
+                      {isPaperActive && (
+                        <span className="inline-flex items-center space-x-1 rounded-full border border-emerald-500/50 bg-emerald-950/80 px-2 py-0.5 text-[9px] font-bold text-emerald-300 shadow-sm shadow-emerald-900/40">
+                          <span className="relative flex h-1.5 w-1.5 mr-0.5">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                            <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                          </span>
+                          <span>Active in Paper</span>
+                        </span>
+                      )}
+                      {getCategoryBadge(rec.strategy_category)}
+                    </div>
                   </div>
 
                   {/* Stock price row */}
@@ -509,106 +613,254 @@ export default function BestOptionsHome({
                     </div>
                   </div>
 
+                  {/* STRUCTURE TOGGLE: SINGLE-LEG VS DEFINED-RISK SPREAD */}
+                  <div className="mb-3 flex items-center justify-between rounded-lg border border-slate-800/80 bg-[#0d1424] p-1 text-[11px]">
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 pl-1.5">
+                      Strategy Structure:
+                    </span>
+                    <div className="flex items-center space-x-1">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setCardModes((prev) => ({ ...prev, [rec.id]: "SINGLE" }))
+                        }
+                        className={`rounded px-2.5 py-1 font-bold transition ${
+                          currentMode === "SINGLE"
+                            ? "bg-cyan-500/25 text-cyan-300 border border-cyan-500/50 shadow-sm"
+                            : "text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        Single Leg
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setCardModes((prev) => ({ ...prev, [rec.id]: "SPREAD" }))
+                        }
+                        className={`rounded px-2.5 py-1 font-bold transition ${
+                          currentMode === "SPREAD"
+                            ? "bg-indigo-500/25 text-indigo-300 border border-indigo-500/50 shadow-sm"
+                            : "text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        Vertical Spread
+                      </button>
+                    </div>
+                  </div>
+
                   {/* CONTRACT SPOTLIGHT BOX */}
-                  <div className="rounded-xl border border-slate-800 bg-[#0c1424] p-3.5 mb-3.5">
-                    <div className="flex items-start justify-between">
-                      <div>
-                        <div className="flex items-center space-x-2">
-                          <span
-                            className={`rounded px-1.5 py-0.5 text-xs font-black ${
-                              isCall
-                                ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
-                                : "bg-rose-500/20 text-rose-300 border border-rose-500/40"
-                            }`}
-                          >
-                            {rec.option_type}
-                          </span>
-                          <span className="text-sm font-black text-white">
-                            ${rec.strike.toFixed(2)} STRIKE
-                          </span>
+                  {currentMode === "SINGLE" ? (
+                    <div className="rounded-xl border border-slate-800 bg-[#0c1424] p-3.5 mb-3">
+                      <div className="flex items-start justify-between">
+                        <div>
+                          <div className="flex items-center space-x-2">
+                            <span
+                              className={`rounded px-1.5 py-0.5 text-xs font-black ${
+                                isCall
+                                  ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
+                                  : "bg-rose-500/20 text-rose-300 border border-rose-500/40"
+                              }`}
+                            >
+                              {rec.option_type}
+                            </span>
+                            <span className="text-sm font-black text-white">
+                              ${rec.strike.toFixed(2)} STRIKE
+                            </span>
+                          </div>
+                          <div className="mt-1 flex items-center space-x-1.5 text-[11px] text-slate-400 font-medium">
+                            <Clock className="h-3 w-3 text-slate-500" />
+                            <span>Exp: {rec.expiration}</span>
+                            <span className="text-cyan-400 font-bold">({rec.dte}d DTE)</span>
+                          </div>
                         </div>
-                        <div className="mt-1 flex items-center space-x-1.5 text-[11px] text-slate-400 font-medium">
-                          <Clock className="h-3 w-3 text-slate-500" />
-                          <span>Exp: {rec.expiration}</span>
-                          <span className="text-cyan-400 font-bold">({rec.dte}d DTE)</span>
+
+                        <div className="text-right">
+                          <div className="text-base font-black text-emerald-400">
+                            ${rec.ask.toFixed(2)}
+                          </div>
+                          <div className="text-[10px] text-slate-500">
+                            Bid: ${rec.bid.toFixed(2)}
+                          </div>
                         </div>
                       </div>
 
-                      <div className="text-right">
-                        <div className="text-base font-black text-emerald-400">
-                          ${rec.ask.toFixed(2)}
+                      {/* Greeks & IV Pill Strip */}
+                      <div className="mt-3 grid grid-cols-4 gap-1.5 border-t border-slate-800/80 pt-2.5 text-center text-[10px]">
+                        <div className="rounded bg-[#101b30] p-1.5">
+                          <div className="text-slate-400 font-medium">Delta (Δ)</div>
+                          <div className="font-mono font-bold text-cyan-300">
+                            {rec.delta > 0 ? "+" : ""}{rec.delta.toFixed(2)}
+                          </div>
                         </div>
-                        <div className="text-[10px] text-slate-500">
-                          Bid: ${rec.bid.toFixed(2)}
+                        <div className="rounded bg-[#101b30] p-1.5">
+                          <div className="text-slate-400 font-medium">Theta (Θ)</div>
+                          <div className="font-mono font-bold text-rose-400">
+                            {rec.theta.toFixed(2)}/d
+                          </div>
+                        </div>
+                        <div className="rounded bg-[#101b30] p-1.5">
+                          <div className="text-slate-400 font-medium">IV %</div>
+                          <div className="font-mono font-bold text-amber-300">
+                            {rec.iv.toFixed(1)}%
+                          </div>
+                        </div>
+                        <div className="rounded bg-[#101b30] p-1.5">
+                          <div className="text-slate-400 font-medium">Breakeven</div>
+                          <div className="font-mono font-bold text-slate-200">
+                            ${rec.breakeven.toFixed(2)}
+                          </div>
                         </div>
                       </div>
                     </div>
+                  ) : (
+                    /* SPREAD SPOTLIGHT BOX */
+                    <div className="rounded-xl border border-indigo-500/30 bg-[#0c142b] p-3.5 mb-3">
+                      <div className="flex items-start justify-between">
+                        <div>
+                          <div className="flex items-center space-x-2">
+                            <span className="rounded px-1.5 py-0.5 text-xs font-black bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
+                              {spread.spread_type === "BULL_CALL" ? "BULL CALL SPREAD" : "BEAR PUT SPREAD"}
+                            </span>
+                            <span className="text-sm font-black text-white">
+                              ${spread.long_strike} / ${spread.short_strike}
+                            </span>
+                          </div>
+                          <div className="mt-1 flex items-center space-x-1.5 text-[11px] text-slate-400 font-medium">
+                            <Shield className="h-3 w-3 text-indigo-400" />
+                            <span>Defined Risk • Capped Loss</span>
+                            <span className="text-cyan-400 font-bold">({rec.dte}d DTE)</span>
+                          </div>
+                        </div>
 
-                    {/* Greeks & IV Pill Strip */}
-                    <div className="mt-3 grid grid-cols-4 gap-1.5 border-t border-slate-800/80 pt-2.5 text-center text-[10px]">
-                      <div className="rounded bg-[#101b30] p-1.5">
-                        <div className="text-slate-400 font-medium">Delta (Δ)</div>
-                        <div className="font-mono font-bold text-cyan-300">
-                          {rec.delta > 0 ? "+" : ""}{rec.delta.toFixed(2)}
+                        <div className="text-right">
+                          <div className="text-base font-black text-emerald-400">
+                            ${spread.net_debit.toFixed(2)} <span className="text-[10px] text-slate-400 font-medium">Debit</span>
+                          </div>
+                          <div className="text-[10px] text-rose-400 font-semibold">
+                            Max Loss: ${spread.max_loss.toFixed(0)}
+                          </div>
                         </div>
                       </div>
-                      <div className="rounded bg-[#101b30] p-1.5">
-                        <div className="text-slate-400 font-medium">Theta (Θ)</div>
-                        <div className="font-mono font-bold text-rose-400">
-                          {rec.theta.toFixed(2)}/d
+
+                      {/* Spread Metrics Strip */}
+                      <div className="mt-3 grid grid-cols-4 gap-1.5 border-t border-slate-800/80 pt-2.5 text-center text-[10px]">
+                        <div className="rounded bg-[#101b30] p-1.5">
+                          <div className="text-slate-400 font-medium">Long Strike</div>
+                          <div className="font-mono font-bold text-emerald-300">
+                            ${spread.long_strike}
+                          </div>
                         </div>
-                      </div>
-                      <div className="rounded bg-[#101b30] p-1.5">
-                        <div className="text-slate-400 font-medium">IV %</div>
-                        <div className="font-mono font-bold text-amber-300">
-                          {rec.iv.toFixed(1)}%
+                        <div className="rounded bg-[#101b30] p-1.5">
+                          <div className="text-slate-400 font-medium">Short Strike</div>
+                          <div className="font-mono font-bold text-indigo-300">
+                            ${spread.short_strike}
+                          </div>
                         </div>
-                      </div>
-                      <div className="rounded bg-[#101b30] p-1.5">
-                        <div className="text-slate-400 font-medium">Breakeven</div>
-                        <div className="font-mono font-bold text-slate-200">
-                          ${rec.breakeven.toFixed(2)}
+                        <div className="rounded bg-[#101b30] p-1.5">
+                          <div className="text-slate-400 font-medium">Spread Width</div>
+                          <div className="font-mono font-bold text-slate-200">
+                            ${spread.width.toFixed(2)}
+                          </div>
+                        </div>
+                        <div className="rounded bg-[#101b30] p-1.5">
+                          <div className="text-slate-400 font-medium">Breakeven</div>
+                          <div className="font-mono font-bold text-amber-300">
+                            ${spread.breakeven.toFixed(2)}
+                          </div>
                         </div>
                       </div>
                     </div>
+                  )}
+
+                  {/* THETA CLIFF & OPTIMAL HOLDING WINDOW BANNER */}
+                  <div
+                    className={`mb-3 flex items-center justify-between rounded-xl border px-3 py-2 text-xs transition ${
+                      thetaInfo.severity === "URGENT" || thetaInfo.severity === "DANGER"
+                        ? "border-rose-500/30 bg-rose-950/20 text-rose-300"
+                        : thetaInfo.severity === "WARNING"
+                        ? "border-amber-500/30 bg-amber-950/20 text-amber-300"
+                        : "border-cyan-500/30 bg-cyan-950/20 text-cyan-300"
+                    }`}
+                  >
+                    <div className="flex items-center space-x-2 min-w-0 pr-2">
+                      <Clock className="h-3.5 w-3.5 shrink-0" />
+                      <span className="text-[11px] font-medium leading-snug truncate">
+                        {thetaInfo.headline}
+                      </span>
+                    </div>
+                    <span className="shrink-0 rounded-md bg-[#0a1120] px-2 py-0.5 font-mono text-[10px] font-bold border border-slate-700/60 text-white">
+                      {thetaInfo.optimalWindow}
+                    </span>
                   </div>
 
                   {/* Profit Target vs Stop Loss metrics */}
-                  <div className="mb-3.5 grid grid-cols-2 gap-2 text-xs">
-                    <div className="rounded-lg border border-emerald-950/60 bg-emerald-950/20 p-2.5">
-                      <div className="flex items-center justify-between text-[10px] text-emerald-400 font-bold uppercase">
-                        <span>Target 1 (TP1)</span>
-                        <span className="font-mono">+{rec.tp1_gain_pct.toFixed(0)}%</span>
+                  {currentMode === "SINGLE" ? (
+                    <div className="mb-3 grid grid-cols-2 gap-2 text-xs">
+                      <div className="rounded-lg border border-emerald-950/60 bg-emerald-950/20 p-2.5">
+                        <div className="flex items-center justify-between text-[10px] text-emerald-400 font-bold uppercase">
+                          <span>Target 1 (TP1)</span>
+                          <span className="font-mono">+{rec.tp1_gain_pct.toFixed(0)}%</span>
+                        </div>
+                        <div className="mt-1 text-sm font-extrabold text-white">
+                          ${rec.tp1_price.toFixed(2)}
+                        </div>
                       </div>
-                      <div className="mt-1 text-sm font-extrabold text-white">
-                        ${rec.tp1_price.toFixed(2)}
-                      </div>
-                    </div>
 
-                    <div className="rounded-lg border border-rose-950/60 bg-rose-950/20 p-2.5">
-                      <div className="flex items-center justify-between text-[10px] text-rose-400 font-bold uppercase">
-                        <span>Stop Loss</span>
-                        <span className="font-mono">-{rec.stop_loss_loss_pct.toFixed(0)}%</span>
-                      </div>
-                      <div className="mt-1 text-sm font-extrabold text-white">
-                        ${rec.stop_loss_price.toFixed(2)}
+                      <div className="rounded-lg border border-rose-950/60 bg-rose-950/20 p-2.5">
+                        <div className="flex items-center justify-between text-[10px] text-rose-400 font-bold uppercase">
+                          <span>Stop Loss</span>
+                          <span className="font-mono">-{rec.stop_loss_loss_pct.toFixed(0)}%</span>
+                        </div>
+                        <div className="mt-1 text-sm font-extrabold text-white">
+                          ${rec.stop_loss_price.toFixed(2)}
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  ) : (
+                    <div className="mb-3 grid grid-cols-2 gap-2 text-xs">
+                      <div className="rounded-lg border border-emerald-950/60 bg-emerald-950/20 p-2.5">
+                        <div className="flex items-center justify-between text-[10px] text-emerald-400 font-bold uppercase">
+                          <span>Max Profit Cap</span>
+                          <span className="font-mono">
+                            +{((spread.max_profit / spread.max_loss) * 100).toFixed(0)}%
+                          </span>
+                        </div>
+                        <div className="mt-1 text-sm font-extrabold text-white">
+                          +${spread.max_profit.toFixed(0)}
+                        </div>
+                      </div>
+
+                      <div className="rounded-lg border border-rose-950/60 bg-rose-950/20 p-2.5">
+                        <div className="flex items-center justify-between text-[10px] text-rose-400 font-bold uppercase">
+                          <span>Defined Max Risk</span>
+                          <span className="font-mono">-100%</span>
+                        </div>
+                        <div className="mt-1 text-sm font-extrabold text-white">
+                          -${spread.max_loss.toFixed(0)}
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Win Probability & Risk/Reward */}
-                  <div className="mb-3.5 flex items-center justify-between rounded-lg bg-[#0e1628] px-3 py-2 text-xs">
+                  <div className="mb-3 flex items-center justify-between rounded-lg bg-[#0e1628] px-3 py-2 text-xs">
                     <div className="flex items-center space-x-1.5">
                       <span className="text-[11px] text-slate-400">Win POP:</span>
                       <span className="font-bold text-emerald-400 font-mono">{rec.pop_pct.toFixed(1)}%</span>
                     </div>
                     <div className="flex items-center space-x-1.5">
-                      <span className="text-[11px] text-slate-400">Risk/Reward:</span>
-                      <span className="font-bold text-cyan-300 font-mono">{rec.risk_reward_ratio.toFixed(2)}:1</span>
+                      <span className="text-[11px] text-slate-400">R:R:</span>
+                      <span className="font-bold text-cyan-300 font-mono">
+                        {currentMode === "SPREAD" ? `${spread.rr_ratio}:1` : `${rec.risk_reward_ratio.toFixed(2)}:1`}
+                      </span>
                     </div>
                     <div className="flex items-center space-x-1 text-[11px] text-slate-400">
                       <span>Size:</span>
-                      <span className="font-bold text-white font-mono">{rec.suggested_contracts}x (${rec.total_capital.toFixed(0)})</span>
+                      <span className="font-bold text-white font-mono">
+                        {currentMode === "SPREAD"
+                          ? `${spread.suggested_contracts}x ($${(spread.net_debit * 100 * spread.suggested_contracts).toFixed(0)})`
+                          : `${rec.suggested_contracts}x ($${rec.total_capital.toFixed(0)})`}
+                      </span>
                     </div>
                   </div>
 
@@ -627,7 +879,7 @@ export default function BestOptionsHome({
                 <div className="border-t border-slate-800/80 pt-3 flex items-center space-x-2">
                   <button
                     type="button"
-                    onClick={() => handlePaperBuyClick(rec)}
+                    onClick={() => handlePaperBuyClick(rec, spread)}
                     className={`flex-1 flex items-center justify-center space-x-1.5 rounded-lg py-2 px-3 text-xs font-black transition active:scale-95 shadow-md ${
                       isBought
                         ? "bg-emerald-400 text-slate-950"
@@ -635,7 +887,23 @@ export default function BestOptionsHome({
                     }`}
                   >
                     <Wallet className="h-3.5 w-3.5 text-slate-950" />
-                    <span>{isBought ? "Filled in Paper!" : `Paper Buy (${rec.suggested_contracts}x)`}</span>
+                    <span>
+                      {isBought
+                        ? "Filled in Paper!"
+                        : currentMode === "SPREAD"
+                        ? `Paper Spread (${spread.suggested_contracts}x)`
+                        : `Paper Buy (${rec.suggested_contracts}x)`}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => openPayoffModal(rec, currentMode)}
+                    title="Interactive Payoff Curve & Profit Diagrams"
+                    className="flex items-center space-x-1 rounded-lg border border-cyan-500/40 bg-cyan-950/40 px-2.5 py-2 text-xs font-bold text-cyan-300 hover:bg-cyan-500/20 hover:border-cyan-400 transition"
+                  >
+                    <LineChart className="h-3.5 w-3.5 text-cyan-400" />
+                    <span className="hidden sm:inline">Payoff</span>
                   </button>
 
                   <button
@@ -691,6 +959,7 @@ export default function BestOptionsHome({
                   const isCall = rec.option_type === "CALL";
                   const isBull = rec.bias === "BULLISH";
                   const isBought = boughtMap[rec.id];
+                  const isPaperActive = isPositionInPaper(rec);
 
                   return (
                     <tr key={rec.id} className="hover:bg-slate-800/40 transition">
@@ -702,6 +971,11 @@ export default function BestOptionsHome({
                           >
                             {rec.symbol}
                           </button>
+                          {isPaperActive && (
+                            <span className="rounded bg-emerald-950/80 px-1.5 py-0.2 text-[9px] font-bold text-emerald-400 border border-emerald-800/50">
+                              IN PAPER
+                            </span>
+                          )}
                           <span className="text-[11px] text-slate-400 truncate max-w-[120px]">
                             {rec.name}
                           </span>
@@ -783,6 +1057,14 @@ export default function BestOptionsHome({
                           </button>
                           <button
                             type="button"
+                            onClick={() => openPayoffModal(rec, "SINGLE")}
+                            title="Interactive Payoff Diagram"
+                            className="rounded-lg border border-cyan-500/40 bg-[#0c182c] p-1 text-cyan-300 hover:bg-cyan-500/20 hover:border-cyan-400 transition"
+                          >
+                            <LineChart className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
                             onClick={() => onSelectTicker(rec.symbol)}
                             title="Terminal Deep Dive"
                             className="rounded-lg border border-slate-700 bg-[#101b30] p-1 text-slate-300 hover:text-cyan-300 hover:border-cyan-500/40"
@@ -806,6 +1088,24 @@ export default function BestOptionsHome({
             </table>
           </div>
         </div>
+      )}
+
+      {/* ========================================================= */}
+      {/* 6. INTERACTIVE OPTION PAYOFF MODAL                        */}
+      {/* ========================================================= */}
+      {selectedPayoffRec && (
+        <OptionPayoffModal
+          isOpen={selectedPayoffRec !== null}
+          onClose={() => setSelectedPayoffRec(null)}
+          rec={selectedPayoffRec}
+          initialMode={payoffInitialMode}
+          onPaperBuy={(order: any) => {
+            onPaperBuy(order);
+            setTimeout(() => {
+              syncPaperPositions();
+            }, 250);
+          }}
+        />
       )}
     </div>
   );
