@@ -131,6 +131,24 @@ export default function StockComparisonDrawer({
     return tie ? null : winner;
   }, [stocks]);
 
+  const topTarget2Winner = useMemo(() => {
+    if (stocks.length < 2) return null;
+    let maxVal = -Infinity;
+    let winner: string | null = null;
+    let tie = false;
+    for (const s of stocks) {
+      const v = s.trade_plan?.tp2_pct ?? 0;
+      if (v > maxVal) {
+        maxVal = v;
+        winner = s.symbol;
+        tie = false;
+      } else if (v === maxVal) {
+        tie = true;
+      }
+    }
+    return tie ? null : winner;
+  }, [stocks]);
+
   const safestRiskWinner = useMemo(() => {
     if (stocks.length < 2) return null;
     let minVal = Infinity;
@@ -566,17 +584,39 @@ export default function StockComparisonDrawer({
                         ))}
                       </tr>
 
+                      {/* Target 2 Gain % (TP2 Runner) */}
+                      <tr className="hover:bg-slate-800/30">
+                        <td className="py-2.5 px-4 text-slate-400 font-sans font-semibold">
+                          Target 2 Runner (TP2)
+                        </td>
+                        {stocks.map((s) => (
+                          <td key={s.symbol} className="py-2.5 px-4 font-bold text-emerald-400/90">
+                            ${s.trade_plan?.tp2 ? s.trade_plan.tp2.toFixed(2) : "—"} (+{s.trade_plan?.tp2_pct ? s.trade_plan.tp2_pct.toFixed(1) : "0.0"}%)
+                            {topTarget2Winner === s.symbol && renderWinnerBadge("Top Runner")}
+                          </td>
+                        ))}
+                      </tr>
+
                       {/* Stop Loss & Invalidation Risk % */}
                       <tr className="hover:bg-slate-800/30">
                         <td className="py-2.5 px-4 text-slate-400 font-sans font-semibold">
                           Invalidation Stop Loss
                         </td>
-                        {stocks.map((s) => (
-                          <td key={s.symbol} className="py-2.5 px-4 font-bold text-rose-400">
-                            ${s.trade_plan?.stop_loss?.toFixed(2) ?? "—"} (-{s.trade_plan?.invalidation_pct?.toFixed(1) ?? "0.0"}%)
-                            {safestRiskWinner === s.symbol && renderWinnerBadge("Safest")}
-                          </td>
-                        ))}
+                        {stocks.map((s) => {
+                          const currPrice = s.price > 0 ? s.price : s.trade_plan?.current_price ?? 0;
+                          const stopPrice = s.trade_plan?.stop_loss ?? 0;
+                          const stopDist = currPrice > stopPrice && stopPrice > 0 ? currPrice - stopPrice : null;
+                          return (
+                            <td key={s.symbol} className="py-2.5 px-4 font-bold text-rose-400">
+                              <span>${stopPrice > 0 ? stopPrice.toFixed(2) : "—"}</span>{" "}
+                              <span className="text-[11px] font-normal text-rose-300">
+                                (-{s.trade_plan?.invalidation_pct ? s.trade_plan.invalidation_pct.toFixed(1) : "0.0"}%
+                                {stopDist !== null ? ` | -$${stopDist.toFixed(2)}` : ""})
+                              </span>
+                              {safestRiskWinner === s.symbol && renderWinnerBadge("Safest")}
+                            </td>
+                          );
+                        })}
                       </tr>
 
                       {/* Risk : Reward Ratio */}

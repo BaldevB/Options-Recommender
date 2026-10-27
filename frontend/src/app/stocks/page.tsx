@@ -740,7 +740,7 @@ function StockRecommendationsContent() {
           {/* Secondary Technical Strategy Filters */}
           <div className="flex flex-wrap items-center gap-1.5 text-xs">
             <span className="text-[10px] uppercase font-semibold text-slate-500 mr-1 flex items-center gap-1">
-              <Activity className="w-3 h-3 text-slate-500" />
+              <Activity className="w-3.5 h-3.5 text-slate-500" />
               Technicals:
             </span>
             {[
@@ -1398,6 +1398,7 @@ function StockRecommendationsContent() {
           openDeepDive(stk);
         }}
         onPaperBuyStock={(stk) => {
+          setIsComparisonOpen(false);
           setCalculatorStock(stk);
         }}
       />
