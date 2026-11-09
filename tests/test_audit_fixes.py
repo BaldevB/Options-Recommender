@@ -126,3 +126,16 @@ def test_monte_carlo_log_drift_not_double_corrected():
                                      simulations=4000, forecast_days=60, seed=1)
     # Double-subtracting sigma^2/2 would push the median ~1.2% below spot here
     assert res.median_final_price / res.current_price == pytest.approx(1.0, abs=0.006)
+
+
+def test_empty_live_screen_returns_no_fabricated_contracts(client):
+    """When no live contract qualifies, the feed is empty and explains why (no hardcoded demo prices)."""
+    with patch("api._get_live_options_recommendations", return_value=[]), \
+         patch.dict("api._LIVE_OPTIONS_STATUS", {"state": "empty", "symbols_screened": 6,
+                                                 "message": "No live contracts passed screening.", "checked_at": 0.0}):
+        resp = client.get("/api/options/recommendations")
+    body = resp.json()
+    assert resp.status_code == 200
+    assert body["total"] == 0 and body["items"] == []
+    assert body["live_status"]["state"] == "empty"
+    assert not hasattr(api, "_get_curated_options_recommendations")

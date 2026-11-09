@@ -127,6 +127,7 @@ export default function BestOptionsHome({
   const [selectedBias, setSelectedBias] = useState<string>("ALL");
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [sortBy, setSortBy] = useState<string>("score");
+  const [liveStatus, setLiveStatus] = useState<{ state: string; message: string } | null>(null);
   const [viewMode, setViewMode] = useState<"grid" | "table">("grid");
   const [boughtMap, setBoughtMap] = useState<Record<string, boolean>>({});
 
@@ -202,6 +203,7 @@ export default function BestOptionsHome({
       }
       const data = await res.json();
       setRecommendations(data.items || []);
+      setLiveStatus(data.live_status || null);
       if (data.market_regime) {
         setMarketRegime(data.market_regime);
       }
@@ -561,8 +563,14 @@ export default function BestOptionsHome({
       {!loading && recommendations.length === 0 && !error && (
         <div className="flex h-64 flex-col items-center justify-center rounded-2xl border border-slate-800 bg-[#090e1a] p-8 text-center text-slate-400">
           <Info className="mb-2 h-8 w-8 text-slate-500" />
-          <p className="text-sm font-medium text-slate-300">No options match your current filter parameters.</p>
-          <p className="text-xs text-slate-500 mt-1">Try switching categories or clearing search query.</p>
+          <p className="text-sm font-medium text-slate-300">
+            {liveStatus?.state === "empty" ? "No live options ideas right now." : "No options match your current filter parameters."}
+          </p>
+          <p className="text-xs text-slate-500 mt-1">
+            {liveStatus?.state === "empty"
+              ? liveStatus.message
+              : "Try switching categories or clearing search query."}
+          </p>
           <button
             onClick={() => {
               setSelectedCategory("ALL");
