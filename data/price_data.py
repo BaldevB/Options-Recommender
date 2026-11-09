@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime, date, timezone
 import logging
+import threading
 import time
 from typing import Dict, Any, Optional, List, Tuple
 import numpy as np
@@ -36,10 +37,12 @@ class QuoteData:
 _CACHE: Dict[str, Any] = {}
 CACHE_TTL = DEFAULT_CONFIG.cache_ttl_seconds
 MAX_PRICE_CACHE_ENTRIES = 50
+# FastAPI runs sync endpoints in a threadpool, so cache access must be serialized
+_CACHE_LOCK = threading.Lock()
 
 
 def _prune_expired_cache() -> None:
-    """Evict expired entries to keep memory footprint minimal."""
+    """Evict expired entries to keep memory footprint minimal. Caller holds the lock."""
     now = time.time()
     expired = [k for k, (ts, _) in _CACHE.items() if (now - ts) > CACHE_TTL]
     for k in expired:
@@ -47,8 +50,11 @@ def _prune_expired_cache() -> None:
 
 
 def _get_from_cache(key: str) -> Optional[Any]:
-    if key in _CACHE:
-        ts, val = _CACHE[key]
+    with _CACHE_LOCK:
+        entry = _CACHE.get(key)
+        if entry is None:
+            return None
+        ts, val = entry
         if time.time() - ts < CACHE_TTL:
             return val
         _CACHE.pop(key, None)
@@ -56,17 +62,19 @@ def _get_from_cache(key: str) -> Optional[Any]:
 
 
 def _set_in_cache(key: str, val: Any) -> None:
-    _prune_expired_cache()
-    if len(_CACHE) >= MAX_PRICE_CACHE_ENTRIES:
-        # Evict oldest entry (FIFO)
-        oldest_key = min(_CACHE.keys(), key=lambda k: _CACHE[k][0])
-        _CACHE.pop(oldest_key, None)
-    _CACHE[key] = (time.time(), val)
+    with _CACHE_LOCK:
+        _prune_expired_cache()
+        if len(_CACHE) >= MAX_PRICE_CACHE_ENTRIES:
+            # Evict oldest entry (FIFO)
+            oldest_key = min(_CACHE.keys(), key=lambda k: _CACHE[k][0])
+            _CACHE.pop(oldest_key, None)
+        _CACHE[key] = (time.time(), val)
 
 
 def clear_price_cache() -> None:
     """Explicitly clear the market price data cache."""
-    _CACHE.clear()
+    with _CACHE_LOCK:
+        _CACHE.clear()
 
 
 # Default periods for each timeframe interval
@@ -213,7 +221,7 @@ def get_candles_data(
             "high": round(float(row["High"]), 2),
             "low": round(float(row["Low"]), 2),
             "close": round(float(row["Close"]), 2),
-            "volume": int(row["Volume"]),
+            "volume": int(row["Volume"]) if not pd.isna(row["Volume"]) else 0,
             "sma20": round(float(row["SMA20"]), 2) if not pd.isna(row["SMA20"]) else None,
             "sma50": round(float(row["SMA50"]), 2) if not pd.isna(row["SMA50"]) else None,
             "vwap": round(float(row["VWAP"]), 2) if not pd.isna(row["VWAP"]) else None,
@@ -303,7 +311,9 @@ def get_current_quote(symbol: str) -> Dict[str, Any]:
                 quote["change"] = round(quote["current_price"] - quote["previous_close"], 2)
                 quote["change_percent"] = round((quote["change"] / quote["previous_close"]) * 100, 2)
 
-        _set_in_cache(cache_key, quote)
+        # Don't cache failures: a transient yfinance hiccup would otherwise 404 the ticker for the full TTL
+        if quote.get("valid"):
+            _set_in_cache(cache_key, quote)
 
     except Exception as exc:
         logger.error("Error fetching current quote for %s: %s", symbol, exc)

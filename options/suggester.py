@@ -1509,7 +1509,10 @@ def calculate_chain_analytics(
     max_pain = min(loss_by_strike, key=loss_by_strike.get) if loss_by_strike else spot
 
     # 2. Expected Move calculation
-    atm_strike = min(all_strikes, key=lambda s: abs(s - spot)) if all_strikes else spot
+    # ATM strike must exist on both sides, otherwise the "straddle" is only one leg
+    both_sides = sorted(set(calls_df["strike"]).intersection(set(puts_df["strike"])))
+    atm_pool = both_sides or all_strikes
+    atm_strike = min(atm_pool, key=lambda s: abs(s - spot)) if atm_pool else spot
     c_match = calls_df[calls_df["strike"] == atm_strike]
     p_match = puts_df[puts_df["strike"] == atm_strike]
 
@@ -1526,7 +1529,7 @@ def calculate_chain_analytics(
         p_price = (ask + bid) / 2.0 if (ask + bid) > 0 else float(p_match["lastPrice"].iloc[0] or 0)
 
     straddle_price = c_price + p_price
-    if straddle_price > 0:
+    if c_price > 0 and p_price > 0:
         expected_move = round(straddle_price * 0.85, 2)
     else:
         atm_iv = 0.40

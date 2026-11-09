@@ -26,6 +26,7 @@ from fastapi import FastAPI, HTTPException, Request
 from analysis.screener_cache import get_screener_cache
 from data.stock_universe import get_stock_universe, STOCK_SECTORS
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 import numpy as np
 import pandas as pd
 
@@ -258,6 +259,8 @@ def get_stock_analysis(
 
     earnings_info = get_earnings_info(ticker, cfg.earnings.blackout_days, cfg.earnings.warning_days)
     momentum = analyze_momentum(hist, ticker, cfg.technicals)
+    if momentum is None:
+        raise HTTPException(status_code=422, detail=f"Not enough price history to analyze {ticker}")
     news_articles = get_company_news(ticker, limit=cfg.news_limit)
     sentiment = analyze_news_sentiment(news_articles, ticker)
     signal = generate_signal(momentum, sentiment, earnings_info, cfg.weights, cfg.earnings)
@@ -593,7 +596,7 @@ def get_high_risk_setups(
 
             if sig.bias == BiasDirection.NEUTRAL:
                 # Derive directional lean for speculative trade setups
-                sig.bias = BiasDirection.BULLISH if mom.momentum_score >= 50 else BiasDirection.BEARISH
+                sig.bias = BiasDirection.BULLISH if mom.momentum_score >= 0 else BiasDirection.BEARISH
                 if sig.confidence < 0.25:
                     sig.confidence = 0.25
 
@@ -703,7 +706,7 @@ def get_zero_dte_endpoint(
             # Intraday momentum bias (if neutral, lean towards technical momentum)
             bias = sig.bias
             if bias == BiasDirection.NEUTRAL:
-                bias = BiasDirection.BULLISH if mom.momentum_score >= 50 else BiasDirection.BEARISH
+                bias = BiasDirection.BULLISH if mom.momentum_score >= 0 else BiasDirection.BEARISH
 
             opt_type = "CALL" if bias == BiasDirection.BULLISH else "PUT"
 
@@ -900,7 +903,9 @@ def _get_live_options_recommendations(force: bool = False) -> List[Dict[str, Any
                 symbols_to_screen.append((it.get("symbol"), it.get("name", it.get("symbol")), it.get("sector", "general"), it.get("score", 75.0), it.get("action", "BUY")))
             else:
                 symbols_to_screen.append((getattr(it, "symbol", ""), getattr(it, "name", ""), getattr(it, "sector", "general"), getattr(it, "score", 75.0), getattr(it, "action", "BUY")))
-    else:
+        # HOLD / AVOID / EARNINGS BLACKOUT rows must not be turned into directional option trades
+        symbols_to_screen = [row for row in symbols_to_screen if "BUY" in str(row[4]).upper()]
+    if not symbols_to_screen:
         # Benchmark liquid equities
         fallback_tickers = [
             ("NVDA", "NVIDIA Corporation", "technology", 88.0, "STRONG BUY"),
@@ -935,7 +940,7 @@ def _get_live_options_recommendations(force: bool = False) -> List[Dict[str, Any
                 bias=bias,
                 combined_score=conf if bias == BiasDirection.BULLISH else -conf,
                 confidence=conf,
-                confidence_tier=ConfidenceTier.HIGH if conf >= 0.75 else ConfidenceTier.MODERATE,
+                confidence_tier=ConfidenceTier.HIGH if conf >= 0.75 else ConfidenceTier.MEDIUM,
                 momentum_score=conf * 100.0,
                 sentiment_score=0.20,
                 is_earnings_blackout=False,
@@ -1755,7 +1760,7 @@ def get_options_recommend_for_ticker(
 
     risk_cfg = RiskManagementConfig(
         account_equity=equity,
-        max_risk_pct=(risk_pct / 100.0 if risk_pct > 0.05 else risk_pct),
+        max_risk_pct=max(risk_pct, 0.0) / 100.0,
         stop_loss_pct=0.50,
     )
     filter_cfg = OptionsFilterConfig(
@@ -2337,7 +2342,7 @@ async def post_paper_quotes_endpoint(request: Request):
     except Exception:
         pass
 
-    quotes = fetch_paper_quotes(items)
+    quotes = await run_in_threadpool(fetch_paper_quotes, items[:60])
     return sanitize_json(quotes)
 
 
@@ -2443,7 +2448,7 @@ async def post_stocks_refresh_endpoint(
         pass
 
     cache = get_screener_cache()
-    res = cache.refresh_cache(force=req_force, tickers=req_tickers)
+    res = await run_in_threadpool(cache.refresh_cache, force=req_force, tickers=req_tickers)
     return sanitize_json(res)
 
 
@@ -2475,7 +2480,7 @@ def get_stocks_monte_carlo_endpoint(
         if hist is not None and not hist.empty:
             cur_price = float(hist["Close"].iloc[-1])
         else:
-            cur_price = 100.0
+            raise HTTPException(status_code=404, detail=f"No price data available for {target_symbol}")
 
     hist_data = get_price_history(target_symbol, period="6mo")
 

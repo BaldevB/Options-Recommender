@@ -929,6 +929,19 @@ class StockScreenerCache:
             self._last_updated_ts = time.time()
             self._status = "ready"
 
+    def _merge_cached_items(self, items: List[Union[StockRecommendation, Dict[str, Any]]]) -> None:
+        """Upsert recommendations into the cache thread-safely, keeping all other symbols."""
+        normalized = [recommendation_to_dict(it) for it in items]
+        with self._lock:
+            for it in normalized:
+                self._cached_dict[it["symbol"]] = it
+            self._cached_items = sorted(
+                self._cached_dict.values(), key=lambda x: x.get("score", 0.0), reverse=True
+            )
+            self._last_updated = datetime.now(timezone.utc).isoformat()
+            self._last_updated_ts = time.time()
+            self._status = "ready"
+
     def get_recommendations(
         self,
         horizon: Optional[str] = None,
@@ -1319,7 +1332,8 @@ class StockScreenerCache:
 
             if recs:
                 if tickers is not None:
-                    self._set_cached_items(recs)
+                    # Ticker-scoped refresh: merge into the cache, never replace the whole universe
+                    self._merge_cached_items(recs)
                 logger.info("Stock screener cache refreshed successfully with %d stocks.", len(recs))
                 return {
                     "status": "success",
@@ -1327,17 +1341,8 @@ class StockScreenerCache:
                     "updated_at": self._last_updated,
                 }
             else:
-                if tickers is not None:
-                    with self._lock:
-                        self._cached_items = []
-                        self._cached_dict = {}
-                        self._status = "empty"
-                else:
-                    with self._lock:
-                        if not self._cached_items:
-                            self._status = "empty"
-                        else:
-                            self._status = "ready"
+                with self._lock:
+                    self._status = "ready" if self._cached_items else "empty"
                 return {
                     "status": "empty",
                     "scanned_stocks": 0,
