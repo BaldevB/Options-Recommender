@@ -59,6 +59,12 @@ class OptionTradePlan:
     ratchet_ladder: List[Dict[str, Any]] = field(default_factory=list)
     rolling_playbook: Dict[str, Any] = field(default_factory=dict)
     broker_bracket_order: Dict[str, Any] = field(default_factory=dict)
+    # Edge model (Monte Carlo of the exit rules). pop_method tells the UI which PoP definition applies.
+    pop_method: str = "risk_neutral_expiry"
+    prob_target_before_stop_pct: Optional[float] = None
+    prob_stop_first_pct: Optional[float] = None
+    prob_time_exit_pct: Optional[float] = None
+    expected_return_pct: Optional[float] = None
 
 
 @dataclass
@@ -95,6 +101,17 @@ class OptionSuggestion:
     vega: float = 0.0                 # Black-Scholes Vega ($/1% IV shift)
     risk_warnings: List[str] = field(default_factory=list)
     trade_plan: Optional[OptionTradePlan] = None
+    # Edge model (populated when a MarketContext is supplied)
+    execution_score: Optional[float] = None     # 0-100: delta fit, spread, liquidity
+    edge_score: Optional[float] = None          # 0-100: simulated return on premium + move coverage
+    iv_source: str = "yfinance"                 # "mid_solved" when IV was re-solved from the bid/ask mid
+    iv_hv_ratio: Optional[float] = None
+    vol_regime: str = "UNKNOWN"                 # RICH / FAIR / CHEAP vs this stock's realized vol
+    expected_move_pct: Optional[float] = None   # typical move over the holding period (realized vol)
+    move_coverage_ratio: Optional[float] = None # expected move / move needed to break even
+    theta_vs_gamma_ratio: Optional[float] = None # daily theta / daily gamma gain at realized vol (>1: decay wins)
+    spans_earnings: bool = False
+    earnings_date: Optional[str] = None
 
 
 @dataclass
@@ -197,6 +214,10 @@ class ScreeningResult:
     elevated_iv: bool = False
     avg_iv_pct: float = 0.0
     audit_log: Dict[str, int] = field(default_factory=dict)
+    # Implied vs realized volatility for this stock (needs a MarketContext)
+    iv_hv_ratio: Optional[float] = None
+    vol_regime: str = "UNKNOWN"
+    realized_vol_pct: Optional[float] = None
 
 
 @dataclass
@@ -215,9 +236,10 @@ def calculate_black_scholes_greeks(
     dte: int,
     iv: float,
     is_call: bool,
-    risk_free_rate: float = 0.045
+    risk_free_rate: float = 0.045,
+    dividend_yield: float = 0.0,
 ) -> OptionGreeks:
-    """Calculate complete Black-Scholes Greeks (Delta, Gamma, Theta, Vega, Rho)."""
+    """Calculate complete Black-Scholes-Merton Greeks (Delta, Gamma, Theta, Vega, Rho) with continuous dividend yield."""
     if spot <= 0 or strike <= 0 or dte < 0:
         return OptionGreeks(
             delta=0.50 if is_call else -0.50,
@@ -230,31 +252,33 @@ def calculate_black_scholes_greeks(
     t = max((dte if dte > 0 else 0.5) / 365.0, 0.0005)
     sigma = max(iv, 0.05)
     r = risk_free_rate
+    q = max(dividend_yield or 0.0, 0.0)
 
     try:
-        d1 = (math.log(spot / strike) + (r + 0.5 * (sigma ** 2)) * t) / (sigma * math.sqrt(t))
+        d1 = (math.log(spot / strike) + (r - q + 0.5 * (sigma ** 2)) * t) / (sigma * math.sqrt(t))
         d2 = d1 - sigma * math.sqrt(t)
+        disc_q = math.exp(-q * t)
 
         norm_cdf_d1 = 0.5 * (1.0 + math.erf(d1 / math.sqrt(2.0)))
         norm_cdf_d2 = 0.5 * (1.0 + math.erf(d2 / math.sqrt(2.0)))
         norm_pdf_d1 = (1.0 / math.sqrt(2.0 * math.pi)) * math.exp(-0.5 * (d1 ** 2))
 
         # Delta
-        delta = norm_cdf_d1 if is_call else (norm_cdf_d1 - 1.0)
+        delta = disc_q * norm_cdf_d1 if is_call else disc_q * (norm_cdf_d1 - 1.0)
 
         # Gamma (identical for Call and Put)
-        gamma = norm_pdf_d1 / (spot * sigma * math.sqrt(t))
+        gamma = disc_q * norm_pdf_d1 / (spot * sigma * math.sqrt(t))
 
         # Theta (1-day decay in $ per share)
-        term1 = -(spot * norm_pdf_d1 * sigma) / (2.0 * math.sqrt(t))
+        term1 = -(spot * disc_q * norm_pdf_d1 * sigma) / (2.0 * math.sqrt(t))
         if is_call:
-            term2 = -r * strike * math.exp(-r * t) * norm_cdf_d2
+            term2 = -r * strike * math.exp(-r * t) * norm_cdf_d2 + q * spot * disc_q * norm_cdf_d1
         else:
-            term2 = r * strike * math.exp(-r * t) * (1.0 - norm_cdf_d2)
+            term2 = r * strike * math.exp(-r * t) * (1.0 - norm_cdf_d2) - q * spot * disc_q * (1.0 - norm_cdf_d1)
         theta = (term1 + term2) / 365.0
 
         # Vega ($ change per 1% IV shift)
-        vega = (spot * math.sqrt(t) * norm_pdf_d1) / 100.0
+        vega = (spot * disc_q * math.sqrt(t) * norm_pdf_d1) / 100.0
 
         # Rho ($ change per 1% interest rate shift)
         if is_call:
@@ -337,34 +361,55 @@ def build_option_trade_plan(
     stop_loss_dollar: float,
     breakeven_px: float,
     contract_symbol: str = "",
+    risk_free_rate: float = 0.045,
+    dividend_yield: float = 0.0,
+    exit_sim: Any = None,
 ) -> OptionTradePlan:
-    """Build a complete, disciplined institutional trade plan for an options position."""
+    """Build a complete, disciplined institutional trade plan for an options position.
+
+    When exit_sim (options.edge.ExitSimulation) is given, probability and expected value come from
+    simulating the plan's own exit rules instead of the risk-neutral "above breakeven at expiry" figure.
+    """
+    from options.edge import bs_price, solve_underlying_for_option_price, holding_period_trading_days
+
     entry_mid = round(max(mid_price, 0.05), 2)
     entry_ask = round(max(ask, 0.05), 2)
     entry_zone = f"${entry_mid:.2f} – ${entry_ask:.2f}"
     abs_delta = max(abs(delta), 0.15)
 
+    # Underlying level at which the option reaches a given price, re-priced with the pricing model at the
+    # midpoint of the holding window (accounts for time decay and changing delta). Falls back to delta-linear.
+    sigma = max(iv_pct / 100.0, 0.05)
+    hold_days = holding_period_trading_days(dte)
+    t_exit = max(dte - round(hold_days * 365.0 / 252.0 / 2.0), 1) / 365.0
+    model_now = float(bs_price(spot_price, strike, max(dte, 0.5) / 365.0, sigma, is_call, risk_free_rate, dividend_yield))
+    anchor = (entry_mid / model_now) if model_now > 0 else 1.0
+
+    def underlying_for(option_px: float, linear_delta: float) -> float:
+        solved = solve_underlying_for_option_price(
+            option_px / anchor, spot_price, strike, t_exit, sigma, is_call, risk_free_rate, dividend_yield
+        )
+        if solved is not None and np.isfinite(solved):
+            return round(solved, 2)
+        move = (option_px - entry_mid) / linear_delta
+        return round(spot_price + move if is_call else spot_price - move, 2)
+
     # 1. Target 1 (+50% option gain)
     tp1_opt_px = round(entry_mid * 1.50, 2)
     tp1_gain = round((tp1_opt_px - entry_mid) * 100.0, 2)
-    delta_move_1 = (tp1_opt_px - entry_mid) / abs_delta
-    tp1_underlying = round(spot_price + delta_move_1 if is_call else spot_price - delta_move_1, 2)
+    tp1_underlying = underlying_for(tp1_opt_px, abs_delta)
     tp1_action = f"Trim 50% of contracts at ${tp1_opt_px:.2f} (+50%) to lock gains; move stop loss on remaining to Breakeven (${entry_mid:.2f})."
 
     # 2. Target 2 (+100% option gain / Core Target)
     tp2_opt_px = round(entry_mid * 2.00, 2)
     tp2_gain = round((tp2_opt_px - entry_mid) * 100.0, 2)
-    eff_delta_2 = min(abs_delta + 0.12, 0.85)  # Account for gamma expansion
-    delta_move_2 = (tp2_opt_px - entry_mid) / eff_delta_2
-    tp2_underlying = round(spot_price + delta_move_2 if is_call else spot_price - delta_move_2, 2)
+    tp2_underlying = underlying_for(tp2_opt_px, min(abs_delta + 0.12, 0.85))
     tp2_action = f"Take profit on 30–50% of position at ${tp2_opt_px:.2f} (+100%); let remaining runners ride with trailing stop."
 
     # 3. Target 3 (+150% runner target)
     tp3_opt_px = round(entry_mid * 2.50, 2)
     tp3_gain = round((tp3_opt_px - entry_mid) * 100.0, 2)
-    eff_delta_3 = min(abs_delta + 0.20, 0.95)
-    delta_move_3 = (tp3_opt_px - entry_mid) / eff_delta_3
-    tp3_underlying = round(spot_price + delta_move_3 if is_call else spot_price - delta_move_3, 2)
+    tp3_underlying = underlying_for(tp3_opt_px, min(abs_delta + 0.20, 0.95))
     tp3_action = "Trail final contracts along 8-day EMA on daily chart until trend breakdown."
 
     # 4. Stop-loss & Invalidation
@@ -373,29 +418,34 @@ def build_option_trade_plan(
     planned_risk = round(contracts * sl_dollar, 2)
     max_capital = round(contracts * entry_ask * 100.0, 2)
 
-    delta_move_sl = (entry_mid - sl_opt_px) / abs_delta
-    underlying_inval = round(spot_price - delta_move_sl if is_call else spot_price + delta_move_sl, 2)
+    underlying_inval = underlying_for(sl_opt_px, abs_delta)
     stop_rule = (
         f"Execute hard exit if option drops to ${sl_opt_px:.2f} (-50% premium loss) "
         f"OR if underlying closes beyond ${underlying_inval:.2f}."
     )
 
     # 5. Probability of Profit (PoP %)
-    pop_pct = calculate_probability_of_profit(
-        spot=spot_price,
-        breakeven=breakeven_px,
-        dte=dte,
-        iv=iv_pct / 100.0,
-        is_call=is_call
-    )
-
     # 6. Risk-to-Reward
     rr_ratio = round(tp2_gain / sl_dollar, 2) if sl_dollar > 0 else 2.0
 
     # 7. Expected Value ($/contract)
-    p_win = pop_pct / 100.0
-    p_loss = 1.0 - p_win
-    ev_val = round((p_win * tp1_gain) - (p_loss * sl_dollar), 2)
+    if exit_sim is not None:
+        # Simulated with the signal's drift and the plan's own exit rules: PoP and EV describe the same trade
+        pop_pct = exit_sim.prob_profit
+        ev_val = exit_sim.expected_pnl
+        pop_method = "monte_carlo_exit_rules"
+    else:
+        pop_pct = calculate_probability_of_profit(
+            spot=spot_price,
+            breakeven=breakeven_px,
+            dte=dte,
+            iv=iv_pct / 100.0,
+            is_call=is_call,
+            risk_free_rate=risk_free_rate,
+        )
+        p_win = pop_pct / 100.0
+        ev_val = round((p_win * tp1_gain) - ((1.0 - p_win) * sl_dollar), 2)
+        pop_method = "risk_neutral_expiry"
 
     # 8. Theta & Time Stop
     daily_theta_dollar = round(abs(theta) * 100.0, 2) if theta != 0.0 else round(entry_mid * 0.03 * 100.0, 2)
@@ -571,6 +621,11 @@ def build_option_trade_plan(
         ratchet_ladder=ratchet_ladder,
         rolling_playbook=rolling_playbook,
         broker_bracket_order=broker_bracket_order,
+        pop_method=pop_method,
+        prob_target_before_stop_pct=exit_sim.prob_target if exit_sim is not None else None,
+        prob_stop_first_pct=exit_sim.prob_stop if exit_sim is not None else None,
+        prob_time_exit_pct=exit_sim.prob_time_exit if exit_sim is not None else None,
+        expected_return_pct=exit_sim.expected_return_pct if exit_sim is not None else None,
     )
 
 
@@ -603,15 +658,27 @@ def rank_and_filter_contracts(
     option_type: str,
     spot_price: float,
     filter_cfg: Optional[OptionsFilterConfig] = None,
-    risk_cfg: Optional[RiskManagementConfig] = None
+    risk_cfg: Optional[RiskManagementConfig] = None,
+    market_ctx: Any = None,
 ) -> Tuple[List[OptionSuggestion], Dict[str, int]]:
-    """Filter by delta (0.30-0.55), volume, open interest, and spread; then rank candidates."""
+    """Filter by delta (0.30-0.55), volume, open interest, and spread; then rank candidates.
+
+    With market_ctx (options.edge.MarketContext) the ranker also: re-solves IV from the mid, drops stale
+    quotes, avoids expirations that span earnings when alternatives exist, and re-ranks the best
+    candidates by simulated edge (signal drift + realized vol + the plan's exit rules).
+    """
+    from options import edge as edge_mod
+
     if df is None or df.empty or spot_price <= 0:
         return [], {"initial_count": 0}
 
     filter_cfg = filter_cfg or DEFAULT_CONFIG.options_filter
     risk_cfg = risk_cfg or DEFAULT_CONFIG.risk
     is_call = (option_type.upper() == "CALL")
+    ctx = market_ctx
+    use_edge = ctx is not None and getattr(ctx.cfg, "enabled", True)
+    r_rate = ctx.risk_free_rate if ctx is not None else filter_cfg.risk_free_rate
+    q_yield = ctx.dividend_yield if ctx is not None else 0.0
 
     audit = {
         "initial_count": len(df),
@@ -619,6 +686,8 @@ def rank_and_filter_contracts(
         "rejected_volume_oi": 0,
         "rejected_spread": 0,
         "rejected_delta": 0,
+        "rejected_stale": 0,
+        "rejected_spans_earnings": 0,
         "passed_strict": 0,
     }
 
@@ -630,6 +699,30 @@ def rank_and_filter_contracts(
     data["spread_pct_of_mid"] = data.apply(
         lambda r: (r["spread"] / r["mid_price"]) if r["mid_price"] > 0 else 1.0, axis=1
     )
+
+    # yfinance IV is often computed from a stale lastPrice; re-solve it from the live bid/ask mid
+    data["iv_source"] = "yfinance"
+    if ctx is not None:
+        solved_ivs = []
+        for _, row in data.iterrows():
+            iv_new = None
+            if row["bid"] > 0 and row["ask"] > row["bid"]:
+                iv_new = edge_mod.implied_vol_from_price(
+                    float(row["mid_price"]), spot_price, float(row["strike"]), int(row["dte"]), is_call, r_rate, q_yield
+                )
+            solved_ivs.append(iv_new)
+        mask = [v is not None for v in solved_ivs]
+        if any(mask):
+            data.loc[mask, "impliedVolatility"] = [v for v in solved_ivs if v is not None]
+            data.loc[mask, "iv_source"] = "mid_solved"
+
+    # Quote age (days since the contract last traded)
+    data["quote_age_days"] = 0.0
+    if ctx is not None and "lastTradeDate" in data.columns:
+        last_trade = pd.to_datetime(data["lastTradeDate"], errors="coerce", utc=True)
+        age = (pd.Timestamp.now(tz="UTC") - last_trade).dt.total_seconds() / 86400.0
+        data["quote_age_days"] = age.fillna(0.0)
+    max_age = ctx.cfg.max_quote_age_days if ctx is not None else None
 
     # Calculate Black-Scholes Greeks for every contract
     deltas = []
@@ -643,7 +736,8 @@ def rank_and_filter_contracts(
             dte=int(row["dte"]),
             iv=float(row["impliedVolatility"]),
             is_call=is_call,
-            risk_free_rate=filter_cfg.risk_free_rate
+            risk_free_rate=r_rate,
+            dividend_yield=q_yield,
         )
         deltas.append(g.delta)
         gammas.append(g.gamma)
@@ -674,6 +768,9 @@ def rank_and_filter_contracts(
         if not (filter_cfg.min_delta <= r["abs_delta"] <= filter_cfg.max_delta):
             audit["rejected_delta"] += 1
             continue
+        if max_age is not None and r["quote_age_days"] > max_age:
+            audit["rejected_stale"] += 1
+            continue
         valid_rows.append(r)
 
     audit["passed_strict"] = len(valid_rows)
@@ -690,12 +787,22 @@ def rank_and_filter_contracts(
                 continue
             if not (0.20 <= r["abs_delta"] <= 0.65):
                 continue
+            if max_age is not None and r["quote_age_days"] > max_age:
+                continue
             valid_rows.append(r)
 
     if not valid_rows:
         return [], audit
 
     filtered = pd.DataFrame(valid_rows)
+
+    # Earnings: an option that expires after the report carries the event gap and the IV crush.
+    # Prefer expirations before earnings whenever any qualify; otherwise keep them, flagged.
+    earn_date = ctx.earnings_date if ctx is not None else None
+    filtered["spans_earnings"] = [edge_mod.spans_earnings(str(e), earn_date) for e in filtered["expiration"]]
+    if filtered["spans_earnings"].any() and not filtered["spans_earnings"].all():
+        audit["rejected_spans_earnings"] = int(filtered["spans_earnings"].sum())
+        filtered = filtered[~filtered["spans_earnings"]]
 
     if is_call:
         filtered["breakeven"] = (filtered["strike"] + filtered["ask"]).round(2)
@@ -710,11 +817,35 @@ def rank_and_filter_contracts(
     log_liq = np.log1p(filtered["volume"] + filtered["openInterest"])
     liq_score = (log_liq / 9.5).clip(0.0, 1.0) * 25.0
 
-    filtered["rank_score"] = (delta_score + spread_score + liq_score).round(1)
+    filtered["execution_score"] = (delta_score + spread_score + liq_score).round(1)
+    filtered["rank_score"] = filtered["execution_score"]
+
+    # Edge re-rank: simulate the best execution candidates and blend in their expected payoff
+    sims: Dict[Any, Any] = {}
+    moves: Dict[Any, Dict[str, Any]] = {}
+    filtered["edge_score"] = np.nan
+    if use_edge:
+        n_pre = max(ctx.cfg.mc_candidates, filter_cfg.top_n_suggestions)
+        pre = filtered.sort_values(by="execution_score", ascending=False).head(n_pre)
+        w = float(np.clip(ctx.cfg.edge_weight, 0.0, 1.0))
+        for idx, row in pre.iterrows():
+            sim = edge_mod.simulate_exit_outcomes(
+                spot_price, float(row["strike"]), float(row["mid_price"]), float(row["impliedVolatility"]),
+                int(row["dte"]), is_call, ctx, half_spread=float(row["spread"]) / 2.0,
+            )
+            mv = edge_mod.move_metrics(
+                spot_price, float(row["breakeven"]), float(row["theta"]), float(row["gamma"]), int(row["dte"]), is_call, ctx
+            )
+            sims[idx], moves[idx] = sim, mv
+            e_score = edge_mod.edge_score_from(sim, mv.get("move_coverage_ratio"))
+            filtered.loc[idx, "edge_score"] = e_score
+            filtered.loc[idx, "rank_score"] = round(w * e_score + (1.0 - w) * float(row["execution_score"]), 1)
+        filtered = filtered.loc[pre.index]
+
     ranked = filtered.sort_values(by="rank_score", ascending=False).head(filter_cfg.top_n_suggestions)
 
     suggestions: List[OptionSuggestion] = []
-    for _, row in ranked.iterrows():
+    for row_idx, row in ranked.iterrows():
         dte = int(row["dte"])
         iv_pct = round(float(row["impliedVolatility"]) * 100.0, 1)
         ask_val = float(row["ask"])
@@ -730,7 +861,8 @@ def rank_and_filter_contracts(
             warnings.append(
                 f"Capital requirement (${ask_val * 100:.0f}/contract) exceeds risk allocation budget (${budget_val:.0f}). Sized to 0 contracts."
             )
-        if iv_pct >= filter_cfg.elevated_iv_threshold:
+        # With realized vol known, "expensive" is judged per stock (vol regime below), not by a fixed IV level
+        if iv_pct >= filter_cfg.elevated_iv_threshold and (ctx is None or ctx.realized_vol <= 0):
             warnings.append(f"Elevated IV ({iv_pct}%) – High volatility premium; consider debit spread.")
         if spread_pct > 7.0:
             warnings.append(f"Spread warning ({spread_pct}% of mid) – Use limit orders.")
@@ -738,6 +870,34 @@ def rank_and_filter_contracts(
             warnings.append(f"Moderate OI ({int(row['openInterest']):,}) – Monitor liquidity.")
         if dte < 21:
             warnings.append(f"Theta acceleration: {dte} DTE remaining.")
+
+        sim = sims.get(row_idx)
+        mv = moves.get(row_idx, {})
+        if ctx is not None:
+            regime = edge_mod.vol_regime(float(row["impliedVolatility"]), ctx.realized_vol, ctx.cfg)
+        else:
+            regime = {"iv_hv_ratio": None, "regime": "UNKNOWN"}
+        row_spans = bool(row.get("spans_earnings", False))
+        if row_spans and earn_date:
+            warnings.append(
+                f"Expiration spans earnings on {earn_date.isoformat()} - expect a price gap and IV crush after the report."
+            )
+        if regime["regime"] == "RICH":
+            warnings.append(
+                f"Options are rich: IV is {regime['iv_hv_ratio']}x this stock's realized volatility - a debit spread offsets the premium."
+            )
+        cov = mv.get("move_coverage_ratio")
+        if cov is not None and cov < 1.0:
+            warnings.append(
+                f"Breakeven needs a {float(row['req_move']):.1f}% move vs ~{mv.get('expected_move_pct')}% typical over the holding period."
+            )
+        tm = mv.get("theta_vs_gamma_ratio")
+        if tm is not None and tm > 1.25:
+            warnings.append(f"Time decay is {tm}x what this stock's typical daily moves earn back (gamma).")
+        if sim is not None and sim.expected_pnl < 0:
+            warnings.append(
+                f"Edge model expects {sim.expected_return_pct:+.1f}% on premium with these exits - weak setup."
+            )
 
         t_plan = build_option_trade_plan(
             spot_price=spot_price,
@@ -757,6 +917,9 @@ def rank_and_filter_contracts(
             stop_loss_dollar=stop_dollar,
             breakeven_px=float(row["breakeven"]),
             contract_symbol=str(row["contractSymbol"]),
+            risk_free_rate=r_rate,
+            dividend_yield=q_yield,
+            exit_sim=sim,
         )
 
         suggestions.append(
@@ -791,6 +954,16 @@ def rank_and_filter_contracts(
                 stop_loss_dollar_risk=stop_dollar,
                 risk_warnings=warnings,
                 trade_plan=t_plan,
+                execution_score=float(row["execution_score"]),
+                edge_score=float(row["edge_score"]) if pd.notna(row.get("edge_score")) else None,
+                iv_source=str(row.get("iv_source", "yfinance")),
+                iv_hv_ratio=regime["iv_hv_ratio"],
+                vol_regime=regime["regime"],
+                expected_move_pct=mv.get("expected_move_pct"),
+                move_coverage_ratio=mv.get("move_coverage_ratio"),
+                theta_vs_gamma_ratio=mv.get("theta_vs_gamma_ratio"),
+                spans_earnings=row_spans,
+                earnings_date=earn_date.isoformat() if earn_date else None,
             )
         )
 
@@ -1386,8 +1559,13 @@ def suggest_options(
     filter_cfg: Optional[OptionsFilterConfig] = None,
     risk_cfg: Optional[RiskManagementConfig] = None,
     high_risk_cfg: Optional[HighRiskOptionsFilterConfig] = None,
+    market_ctx: Any = None,
 ) -> ScreeningResult:
-    """Generate filtered options suggestions with Delta targeting, debit spreads, and high-risk setups."""
+    """Generate filtered options suggestions with Delta targeting, debit spreads, and high-risk setups.
+
+    Pass market_ctx (options.edge.build_market_context) to rank by simulated edge and to judge
+    "elevated IV" against the stock's own realized volatility instead of a fixed 45% cutoff.
+    """
     filter_cfg = filter_cfg or DEFAULT_CONFIG.options_filter
     risk_cfg = risk_cfg or DEFAULT_CONFIG.risk
     high_risk_cfg = high_risk_cfg or DEFAULT_CONFIG.high_risk_filter
@@ -1396,11 +1574,11 @@ def suggest_options(
         return ScreeningResult()
 
     if signal.bias == BiasDirection.BULLISH:
-        suggestions, audit = rank_and_filter_contracts(calls_df, "CALL", spot_price, filter_cfg, risk_cfg)
+        suggestions, audit = rank_and_filter_contracts(calls_df, "CALL", spot_price, filter_cfg, risk_cfg, market_ctx)
         chain_for_spreads = calls_df
         opt_type = "CALL"
     else:
-        suggestions, audit = rank_and_filter_contracts(puts_df, "PUT", spot_price, filter_cfg, risk_cfg)
+        suggestions, audit = rank_and_filter_contracts(puts_df, "PUT", spot_price, filter_cfg, risk_cfg, market_ctx)
         chain_for_spreads = puts_df
         opt_type = "PUT"
 
@@ -1417,6 +1595,16 @@ def suggest_options(
 
     avg_iv = np.mean([s.implied_volatility_pct for s in suggestions])
     elevated_iv = (avg_iv >= filter_cfg.elevated_iv_threshold)
+    iv_hv_ratio: Optional[float] = None
+    regime = "UNKNOWN"
+    realized_vol_pct: Optional[float] = None
+    if market_ctx is not None and market_ctx.realized_vol > 0:
+        from options.edge import vol_regime as _vol_regime
+        reg = _vol_regime(avg_iv / 100.0, market_ctx.realized_vol, market_ctx.cfg)
+        iv_hv_ratio, regime = reg["iv_hv_ratio"], reg["regime"]
+        realized_vol_pct = round(market_ctx.realized_vol * 100.0, 1)
+        # "Expensive" is relative to how much this stock actually moves, not a fixed IV level
+        elevated_iv = regime == "RICH"
 
     spread_recs: List[DebitSpreadSuggestion] = []
     top_spread = build_debit_spread(suggestions[0], chain_for_spreads, spot_price, risk_cfg)
@@ -1430,6 +1618,9 @@ def suggest_options(
         elevated_iv=elevated_iv,
         avg_iv_pct=round(avg_iv, 1),
         audit_log=audit,
+        iv_hv_ratio=iv_hv_ratio,
+        vol_regime=regime,
+        realized_vol_pct=realized_vol_pct,
     )
 
 

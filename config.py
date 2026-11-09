@@ -223,6 +223,32 @@ class SignalWeights:
     high_confidence_thresh: float = 0.45
     medium_confidence_thresh: float = 0.25
     low_confidence_thresh: float = 0.15
+    # "dampen_only": headline sentiment can only lower confidence (it is weak evidence);
+    # "blend": legacy weighted blend of momentum and sentiment.
+    sentiment_mode: str = "dampen_only"
+
+
+@dataclass
+class EdgeModelConfig:
+    """Parameters for the contract edge model (Monte Carlo exit simulation + ranking)."""
+    enabled: bool = True
+    simulations: int = 1500
+    seed: Optional[int] = 7
+    # Daily log-drift granted to a full-confidence signal (0.0006/day ~ 15%/yr).
+    # Kept deliberately modest until the recommendation journal shows the signal has real edge.
+    max_signal_drift_daily: float = 0.0006
+    # Exit rules simulated (must match the trade plan)
+    take_profit_mult: float = 1.50
+    stop_loss_mult: float = 0.50
+    # Contracts re-scored by Monte Carlo after the cheap liquidity/delta pre-rank
+    mc_candidates: int = 8
+    # Final rank = edge_weight * edge score + (1 - edge_weight) * execution score
+    edge_weight: float = 0.60
+    # IV / realized-vol regime boundaries
+    rich_iv_hv_ratio: float = 1.30
+    cheap_iv_hv_ratio: float = 0.90
+    # Reject quotes whose last trade is older than this many calendar days
+    max_quote_age_days: int = 4
 
 
 @dataclass
@@ -245,6 +271,7 @@ class AppConfig:
     zero_dte_filter: ZeroDteOptionsFilterConfig = field(default_factory=ZeroDteOptionsFilterConfig)
     risk: RiskManagementConfig = field(default_factory=RiskManagementConfig)
     weights: SignalWeights = field(default_factory=SignalWeights)
+    edge: EdgeModelConfig = field(default_factory=EdgeModelConfig)
     history_period: str = "6mo"
     news_limit: int = 10
     cache_ttl_seconds: int = 900  # 15 minutes TTL for market data caching

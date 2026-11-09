@@ -137,7 +137,7 @@ def _clean_chain_df(df: pd.DataFrame, expiration: str, dte: int, option_type: st
     cols = [
         "contractSymbol", "expiration", "dte", "type", "strike",
         "lastPrice", "bid", "ask", "spread", "spread_ratio",
-        "volume", "openInterest", "impliedVolatility", "inTheMoney"
+        "volume", "openInterest", "impliedVolatility", "inTheMoney", "lastTradeDate"
     ]
     existing_cols = [c for c in cols if c in clean.columns]
     return clean[existing_cols]
