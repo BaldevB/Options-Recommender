@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import dynamic from "next/dynamic";
 import {
   RefreshCw,
@@ -46,8 +46,13 @@ export default function OptionsChainMatrix({
   const [chainContracts, setChainContracts] = useState<number>(1);
   const [chainPaperToast, setChainPaperToast] = useState<string | null>(null);
 
+  // Only the latest chain request may update state (ticker/expiration can change mid-flight)
+  const chainRequestId = useRef(0);
+
   // Fetch options chain matrix from API
   const fetchChain = async (exp?: string) => {
+    const requestId = ++chainRequestId.current;
+    const isCurrent = () => requestId === chainRequestId.current;
     setLoading(true);
     setError(null);
     try {
@@ -57,6 +62,7 @@ export default function OptionsChainMatrix({
       const res = await fetch(url);
       if (!res.ok) throw new Error(`Failed to load options chain for ${ticker}`);
       const json = await res.json();
+      if (!isCurrent()) return;
       // Always retain returned data (name, spot price, expirations list)
       setData(json);
       if (json.selected_expiration) {
@@ -84,14 +90,17 @@ export default function OptionsChainMatrix({
         }
       }
     } catch (err: any) {
+      if (!isCurrent()) return;
       console.error(err);
       setError(err.message || "Failed to load options chain matrix");
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   };
 
   useEffect(() => {
+    // Drop the previous ticker's contract so a paper buy can't mix tickers
+    setInspectedOption(null);
     fetchChain();
   }, [ticker]);
 

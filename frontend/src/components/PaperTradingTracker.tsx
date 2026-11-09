@@ -268,10 +268,15 @@ export default function PaperTradingTracker({
     }
   }, [positions, refreshLiveQuotes]);
 
+  // Only the latest chain request may fill the order ticket (a late response could set another ticker's strike/price)
+  const chainRequestId = useRef(0);
+
   // Fetch options chain & live quotes for the current ticker and expiration
   const fetchChainForTicker = useCallback(async (targetTicker: string, targetExp?: string) => {
     const sym = targetTicker.trim().toUpperCase();
     if (!sym) return;
+    const requestId = ++chainRequestId.current;
+    const isCurrent = () => requestId === chainRequestId.current;
 
     setChainLoading(true);
     setQuoteFeedback(null);
@@ -282,6 +287,7 @@ export default function PaperTradingTracker({
       const res = await fetch(url);
       if (res.ok) {
         const data = await res.json();
+        if (!isCurrent()) return;
         setChainData(data);
 
         // Update available expirations
@@ -313,7 +319,7 @@ export default function PaperTradingTracker({
     } catch (err) {
       console.error("Failed to load options chain matrix for paper ticket:", err);
     } finally {
-      setChainLoading(false);
+      if (isCurrent()) setChainLoading(false);
     }
   }, []);
 

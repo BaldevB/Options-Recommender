@@ -57,7 +57,11 @@ export default function StockChart({ symbol, data }: StockChartProps) {
   const [hoveredCandle, setHoveredCandle] = useState<CandleData | null>(null);
 
   // Sync with incoming parent data when symbol changes
+  // Only the latest timeframe request may update the chart
+  const timeframeRequestId = useRef(0);
+
   useEffect(() => {
+    timeframeRequestId.current += 1; // invalidate in-flight requests for the previous symbol
     setActiveInterval("1d");
     setCandles(data || []);
     setError(null);
@@ -66,6 +70,8 @@ export default function StockChart({ symbol, data }: StockChartProps) {
   // Fetch smaller or larger timeframes on demand
   const handleTimeframeChange = async (tf: TimeframeOption) => {
     if (activeInterval === tf.id && candles.length > 0) return;
+    const requestId = ++timeframeRequestId.current;
+    const isCurrent = () => requestId === timeframeRequestId.current;
     setActiveInterval(tf.id);
     setLoading(true);
     setError(null);
@@ -78,16 +84,18 @@ export default function StockChart({ symbol, data }: StockChartProps) {
         throw new Error(`Failed to fetch ${tf.label} data`);
       }
       const json = await res.json();
+      if (!isCurrent()) return;
       if (json.candles && json.candles.length > 0) {
         setCandles(json.candles);
       } else {
         throw new Error(`No ${tf.label} bars available`);
       }
     } catch (err: any) {
+      if (!isCurrent()) return;
       console.error(err);
       setError(err.message || `Failed to load ${tf.label} timeframe`);
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   };
 
