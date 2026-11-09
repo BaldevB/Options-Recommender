@@ -36,6 +36,7 @@ import OptionPayoffModal, {
   getThetaCliffInfo,
   SpreadData,
 } from "./OptionPayoffModal";
+import CalibrationPanel from "./CalibrationPanel";
 
 export interface OptionRecommendation {
   id: string;
@@ -77,7 +78,24 @@ export interface OptionRecommendation {
   sector_label: string;
   rationale: string[];
   vertical_spread?: SpreadData;
+  // Edge model (absent for curated sample ideas)
+  edge_score?: number | null;
+  execution_score?: number | null;
+  pop_method?: "monte_carlo_exit_rules" | "risk_neutral_expiry" | string;
+  prob_target_before_stop_pct?: number | null;
+  expected_return_pct?: number | null;
+  vol_regime?: "RICH" | "FAIR" | "CHEAP" | "UNKNOWN" | string;
+  iv_hv_ratio?: number | null;
+  spans_earnings?: boolean;
+  earnings_date?: string | null;
+  calibrated_win_rate_pct?: number | null;
 }
+
+const VOL_REGIME_STYLE: Record<string, string> = {
+  CHEAP: "text-emerald-300",
+  FAIR: "text-slate-200",
+  RICH: "text-amber-300",
+};
 
 interface BestOptionsHomeProps {
   onSelectTicker: (symbol: string) => void;
@@ -473,6 +491,7 @@ export default function BestOptionsHome({
                 className="rounded-lg border border-slate-800 bg-[#0d1424] px-2.5 py-1 text-xs text-white focus:border-cyan-500 focus:outline-none"
               >
                 <option value="score">Highest Confidence</option>
+                <option value="edge">Best Edge (simulated payoff)</option>
                 <option value="win_rate">Probability of Profit (POP)</option>
                 <option value="rr_ratio">Best Risk / Reward (R:R)</option>
                 <option value="price">Lowest Contract Cost</option>
@@ -879,7 +898,14 @@ export default function BestOptionsHome({
 
                   {/* Win Probability & Risk/Reward */}
                   <div className="mb-3 flex items-center justify-between rounded-lg bg-[#0e1628] px-3 py-2 text-xs">
-                    <div className="flex items-center space-x-1.5" title="Theoretical Black-Scholes estimate, not proven historical win rate">
+                    <div
+                      className="flex items-center space-x-1.5"
+                      title={
+                        rec.pop_method === "monte_carlo_exit_rules"
+                          ? "Chance of closing with a profit under this plan's exits (+50% target, -50% stop, time stop), simulated with the stock's realized volatility and the signal. A model estimate, not a track record."
+                          : "Theoretical Black-Scholes estimate of finishing above breakeven at expiry, not proven historical win rate"
+                      }
+                    >
                       <span className="text-[11px] text-slate-400">Model PoP:</span>
                       <span className="font-bold text-emerald-400 font-mono">{rec.pop_pct.toFixed(1)}%</span>
                     </div>
@@ -898,6 +924,52 @@ export default function BestOptionsHome({
                       </span>
                     </div>
                   </div>
+
+                  {/* Edge model: simulated payoff of this plan + volatility regime + earnings + track record */}
+                  {currentMode !== "SPREAD" && rec.edge_score !== undefined && rec.edge_score !== null && (
+                    <div className="mb-3 rounded-lg border border-slate-800 bg-[#0e1628] px-3 py-2 text-[11px]">
+                      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                        <span className="text-slate-400">
+                          Edge <span className="font-mono font-bold text-white">{rec.edge_score.toFixed(0)}</span>/100
+                        </span>
+                        {rec.prob_target_before_stop_pct !== null && rec.prob_target_before_stop_pct !== undefined && (
+                          <span className="text-slate-400" title="Simulated chance the option reaches +50% before the -50% stop">
+                            +50% first: <span className="font-mono font-bold text-white">{rec.prob_target_before_stop_pct.toFixed(0)}%</span>
+                          </span>
+                        )}
+                        {rec.expected_return_pct !== null && rec.expected_return_pct !== undefined && (
+                          <span className="text-slate-400" title="Simulated average return on the premium paid, after spread costs">
+                            Exp. return:{" "}
+                            <span className={`font-mono font-bold ${rec.expected_return_pct >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                              {rec.expected_return_pct >= 0 ? "+" : ""}
+                              {rec.expected_return_pct.toFixed(1)}%
+                            </span>
+                          </span>
+                        )}
+                        {rec.vol_regime && rec.vol_regime !== "UNKNOWN" && (
+                          <span className="text-slate-400" title="Implied volatility relative to this stock's own realized volatility">
+                            Options:{" "}
+                            <span className={`font-bold ${VOL_REGIME_STYLE[rec.vol_regime] || "text-slate-200"}`}>
+                              {rec.vol_regime.toLowerCase()}
+                            </span>
+                            {rec.iv_hv_ratio ? <span className="font-mono"> ({rec.iv_hv_ratio.toFixed(2)}× RV)</span> : null}
+                          </span>
+                        )}
+                      </div>
+                      {(rec.spans_earnings || (rec.calibrated_win_rate_pct !== null && rec.calibrated_win_rate_pct !== undefined)) && (
+                        <div className="mt-1 flex flex-wrap items-center justify-between gap-x-3 text-[10px]">
+                          {rec.spans_earnings && (
+                            <span className="text-amber-300">⚠ Holds earnings{rec.earnings_date ? ` (${rec.earnings_date})` : ""}: gap + IV crush risk</span>
+                          )}
+                          {rec.calibrated_win_rate_pct !== null && rec.calibrated_win_rate_pct !== undefined && (
+                            <span className="text-slate-400">
+                              Similar past ideas won <span className="font-mono font-bold text-white">{rec.calibrated_win_rate_pct.toFixed(0)}%</span>
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* Zero-Contract Risk Safeguard Notice */}
                   {rec.suggested_contracts === 0 && (
@@ -1147,6 +1219,9 @@ export default function BestOptionsHome({
           </div>
         </div>
       )}
+
+      {/* Track record of past recommendations (recommendation journal) */}
+      <CalibrationPanel />
 
       {/* ========================================================= */}
       {/* 6. INTERACTIVE OPTION PAYOFF MODAL                        */}
