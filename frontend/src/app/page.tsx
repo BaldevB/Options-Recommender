@@ -203,7 +203,8 @@ export default function Home() {
   ) => {
     try {
       const savedBalanceStr = localStorage.getItem("options_paper_balance");
-      const balance = savedBalanceStr ? parseFloat(savedBalanceStr) : 10000;
+      const parsedBalance = savedBalanceStr ? parseFloat(savedBalanceStr) : NaN;
+      const balance = Number.isFinite(parsedBalance) ? parsedBalance : 10000;
       const contractsCandidate = customContracts ?? opt.suggested_contracts ?? opt.contracts ?? 0;
       if (contractsCandidate <= 0) {
         alert("Cannot execute paper order: 0 contracts qualified (trade exceeds risk budget).");
@@ -231,6 +232,7 @@ export default function Home() {
         contract: contractSym,
         optionType: type,
         strike: opt.strike,
+        shortStrike: opt.isSpread && opt.short_strike !== undefined ? Number(opt.short_strike) : undefined,
         expiration: opt.expiration || "2026-10-16",
         dte: opt.dte || 30,
         entryPrice: askPx,

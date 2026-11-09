@@ -2152,6 +2152,7 @@ def fetch_paper_quotes(items_to_quote: List[Any]) -> Dict[str, Any]:
                     "expiration": occ_info["expiration"] if occ_info else None,
                     "option_type": occ_info["option_type"] if occ_info else "CALL",
                     "strike": occ_info["strike"] if occ_info else None,
+                    "occ_symbol": sym if occ_info else None,
                 })
         elif isinstance(it, dict):
             sym = (it.get("symbol") or it.get("contract") or it.get("ticker") or "").strip().upper()
@@ -2183,6 +2184,7 @@ def fetch_paper_quotes(items_to_quote: List[Any]) -> Dict[str, Any]:
                 "expiration": exp_val,
                 "option_type": opt_type,
                 "strike": strike_val,
+                "occ_symbol": key if parse_occ_symbol(key) else (sym if parse_occ_symbol(sym) else None),
             })
 
     if not extracted:
@@ -2191,7 +2193,11 @@ def fetch_paper_quotes(items_to_quote: List[Any]) -> Dict[str, Any]:
     results: Dict[str, Any] = {}
     all_syms_set = []
     for it in extracted:
-        if it["symbol"]:
+        if it["asset_type"] == "OPTION":
+            # Options are priced by their OCC symbol, never by the underlying ticker
+            if it["occ_symbol"]:
+                all_syms_set.append(it["occ_symbol"])
+        elif it["symbol"]:
             all_syms_set.append(it["symbol"])
         if it["ticker"]:
             all_syms_set.append(it["ticker"])
@@ -2261,7 +2267,11 @@ def fetch_paper_quotes(items_to_quote: List[Any]) -> Dict[str, Any]:
                     "expiration": exp_date_str,
                 }
             else:
-                px, prev_close = _get_price(sym)
+                if asset_type == "OPTION":
+                    # Unpriceable option (no OCC symbol, e.g. a spread label) -> invalid quote, not the stock price
+                    px, prev_close = _get_price(item["occ_symbol"]) if item["occ_symbol"] else (0.0, 0.0)
+                else:
+                    px, prev_close = _get_price(sym)
                 change = round(px - prev_close, 2) if (px > 0 and prev_close > 0) else 0.0
                 change_pct = round((change / prev_close) * 100.0, 2) if prev_close > 0 else 0.0
                 results[key] = {

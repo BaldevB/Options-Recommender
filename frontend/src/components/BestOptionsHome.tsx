@@ -216,6 +216,7 @@ export default function BestOptionsHome({
         symbol: rec.symbol,
         contract: `${rec.symbol} ${spread.spread_type} ${spread.long_strike}/${spread.short_strike}`,
         strike: spread.long_strike,
+        short_strike: spread.short_strike,
         option_type: rec.option_type,
         expiration: rec.expiration,
         dte: rec.dte,
