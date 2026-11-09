@@ -18,6 +18,8 @@ os.environ.setdefault("MALLOC_ARENA_MAX", "2")
 import gc
 import re
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, date, timezone, timedelta
 import logging
 from contextlib import asynccontextmanager
@@ -494,6 +496,11 @@ def get_stock_analysis(
     return sanitize_json(result)
 
 
+# Screening the AI universe takes tens of seconds; identical requests reuse the result for a few minutes
+_HIGH_CONF_CACHE: Dict[tuple, Any] = {}
+HIGH_CONF_CACHE_TTL = 300.0
+
+
 @app.get("/api/high-confidence")
 def get_high_confidence_picks(
     sector: str = "all_ai",
@@ -505,6 +512,11 @@ def get_high_confidence_picks(
     cfg = AppConfig()
     cfg.risk.account_equity = float(equity)
     cfg.risk.max_risk_pct = float(risk_pct) / 100.0
+
+    cache_key = (sector, round(float(min_confidence), 1), round(float(equity), 2), round(float(risk_pct), 3))
+    cached = _HIGH_CONF_CACHE.get(cache_key)
+    if cached and time.time() - cached[0] < HIGH_CONF_CACHE_TTL:
+        return cached[1]
 
     if sector == "chips":
         tickers = AI_STOCKS_CATEGORIES["AI Chips & Semiconductors"]
@@ -531,20 +543,19 @@ def get_high_confidence_picks(
     else:
         tickers = AI_STOCKS_UNIVERSE
 
-    results = []
-    for sym in tickers:
+    def _screen_one(sym: str) -> Optional[Dict[str, Any]]:
         try:
             quote = get_current_quote(sym)
             if not quote["valid"]:
-                continue
+                return None
 
             hist = get_price_history(sym, period=cfg.history_period)
             if hist is None:
-                continue
+                return None
 
             e_info = get_earnings_info(sym, cfg.earnings.blackout_days, cfg.earnings.warning_days)
             if e_info.get("is_blackout"):
-                continue
+                return None
 
             mom = analyze_momentum(hist, sym, cfg.technicals)
             articles = get_company_news(sym, limit=5)
@@ -553,7 +564,7 @@ def get_high_confidence_picks(
 
             conf_pct = sig.confidence * 100.0
             if conf_pct < float(min_confidence) or sig.bias == BiasDirection.NEUTRAL:
-                continue
+                return None
 
             calls_df, puts_df, _ = get_options_chains(sym, cfg.options_filter.min_dte, cfg.options_filter.max_dte)
             screening = suggest_options(
@@ -567,7 +578,7 @@ def get_high_confidence_picks(
                 best = screening.single_leg_suggestions[0]
                 spd = screening.spread_suggestions[0] if screening.spread_suggestions else None
                 hr = screening.high_risk_setup
-                results.append({
+                return {
                     "symbol": sym,
                     "name": quote["name"],
                     "price": quote["current_price"],
@@ -619,13 +630,23 @@ def get_high_confidence_picks(
                         "trade_plan": hr.trade_plan,
                     } if hr else None,
                     "rationale": sig.rationale[:4],
-                })
+                }
         except Exception as exc:
             logger.warning("Error screening %s: %s", sym, exc)
+            return None
+        return None
+
+    # Each ticker is I/O bound (yfinance); screening them in parallel keeps the request under the proxy timeout
+    results: List[Dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for item in pool.map(_screen_one, tickers):
+            if item:
+                results.append(item)
 
     results.sort(key=lambda x: x["confidence_pct"], reverse=True)
-    return sanitize_json({"count": len(results), "picks": results})
-
+    payload = sanitize_json({"count": len(results), "picks": results})
+    _HIGH_CONF_CACHE[cache_key] = (time.time(), payload)
+    return payload
 
 @app.get("/api/high-risk-setups")
 def get_high_risk_setups(
@@ -1007,17 +1028,25 @@ def _get_live_options_recommendations(force: bool = False) -> List[Dict[str, Any
         symbols_to_screen = fallback_tickers
 
     cfg = DEFAULT_CONFIG
+    # Why tickers produced no idea, so an empty feed can be explained instead of silent
+    skip_reasons: Dict[str, int] = {}
+    first_error = ""
+
+    def _skip(reason: str) -> None:
+        skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
 
     for sym, name, sector, score, action in symbols_to_screen[:6]:
         try:
             q = get_current_quote(sym)
             if not q or not q.get("valid") or float(q.get("current_price", 0.0)) <= 0:
+                _skip("no price data (market data unavailable or rate-limited)")
                 continue
             spot = float(q["current_price"])
             change_p = float(q.get("change_percent", 0.0))
 
             calls_df, puts_df, target_exps = get_options_chains(sym, min_dte=14, max_dte=45)
             if (calls_df is None or calls_df.empty) and (puts_df is None or puts_df.empty):
+                _skip("no listed options in the 14-45 DTE window")
                 continue
 
             # Determine bias
@@ -1044,6 +1073,8 @@ def _get_live_options_recommendations(force: bool = False) -> List[Dict[str, Any
                 market_ctx=_edge_ctx(sym, spot, live_hist, signal, live_earn),
             )
             _journal_screening(screening, sym, signal, "live-feed")
+            if not screening.single_leg_suggestions:
+                _skip("no contract passed liquidity, spread and delta filters")
 
             if screening.single_leg_suggestions:
                 best = screening.single_leg_suggestions[0]
@@ -1121,17 +1152,22 @@ def _get_live_options_recommendations(force: bool = False) -> List[Dict[str, Any
                     **edge_fields(best),
                 })
         except Exception as exc:
-            logger.debug("Live options screening failed for %s: %s", sym, exc)
+            logger.warning("Live options screening failed for %s: %s", sym, exc)
+            _skip(f"error: {type(exc).__name__}")
+            first_error = first_error or f"{type(exc).__name__}: {str(exc)[:160]}"
 
     if not candidates:
         # No live contract passed screening. Return nothing rather than made-up prices.
         _LIVE_OPTIONS_STATUS.update({
             "state": "empty",
             "checked_at": now,
-            "symbols_screened": len(symbols_to_screen),
+            "symbols_screened": len(symbols_to_screen[:6]),
+            "reasons": skip_reasons,
             "message": (
-                f"No live contracts passed screening across {len(symbols_to_screen)} stocks. "
-                "Market data may be unavailable or no contract met the liquidity and delta filters. Retry shortly."
+                f"No live contracts passed screening across {len(symbols_to_screen[:6])} stocks. "
+                + ("Reasons: " + "; ".join(f"{n} × {r}" for r, n in skip_reasons.items()) + ". " if skip_reasons else "")
+                + (f"First error: {first_error}. " if first_error else "")
+                + "Retry in a minute."
             ),
         })
         _LIVE_OPTIONS_CACHE["timestamp"] = now
@@ -1518,7 +1554,7 @@ def get_options_recommendations_endpoint(
 
     return sanitize_json({
         "total": len(items),
-        "live_status": {k: _LIVE_OPTIONS_STATUS[k] for k in ("state", "symbols_screened", "message")},
+        "live_status": {k: _LIVE_OPTIONS_STATUS.get(k) for k in ("state", "symbols_screened", "message", "reasons")},
         "data_source": "yfinance (delayed ~15m)",
         "retrieved_at_utc": datetime.now(timezone.utc).isoformat(),
         "disclaimer": "Options quotes are delayed ~15m. Win probability is a theoretical Black-Scholes estimate N(d2). Slippage and broker fees excluded.",
