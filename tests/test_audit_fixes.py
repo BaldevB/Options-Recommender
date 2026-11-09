@@ -139,3 +139,14 @@ def test_empty_live_screen_returns_no_fabricated_contracts(client):
     assert body["total"] == 0 and body["items"] == []
     assert body["live_status"]["state"] == "empty"
     assert not hasattr(api, "_get_curated_options_recommendations")
+
+
+def test_empty_live_screen_explains_why():
+    """When market data fails for every ticker, the status names the cause instead of staying silent."""
+    with patch("api.get_current_quote", side_effect=RuntimeError("429 Too Many Requests")):
+        items = api._get_live_options_recommendations(force=True)
+    assert items == []
+    status = api._LIVE_OPTIONS_STATUS
+    assert status["state"] == "empty"
+    assert "429 Too Many Requests" in status["message"]
+    assert any(k.startswith("error") for k in status["reasons"])

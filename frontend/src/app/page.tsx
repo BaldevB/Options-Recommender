@@ -573,7 +573,7 @@ export default function Home() {
                   }`}
                 >
                   <Target className="h-3.5 w-3.5 text-cyan-400" />
-                  <span>?? Best Options</span>
+                  <span>Best Options</span>
                 </button>
 
                 <button
