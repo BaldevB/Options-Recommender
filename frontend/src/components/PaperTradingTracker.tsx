@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   Wallet,
   TrendingUp,
@@ -34,6 +34,8 @@ import {
   calculateOptionSettlement,
   settleExpiredPositions,
   settleSinglePosition,
+  isStockPosition,
+  positionMarketValue,
   addOrConsolidatePosition,
   consolidateOpenPositions,
 } from "../utils/paperSettlement";
@@ -128,7 +130,8 @@ export default function PaperTradingTracker({
         let initialCash = DEFAULT_STARTING_CASH;
         const savedBalance = localStorage.getItem(STORAGE_KEY_BALANCE);
         if (savedBalance) {
-          initialCash = parseFloat(savedBalance);
+          const parsedCash = parseFloat(savedBalance);
+          initialCash = Number.isFinite(parsedCash) ? parsedCash : DEFAULT_STARTING_CASH;
           setCashBalance(initialCash);
         }
 
@@ -191,18 +194,24 @@ export default function PaperTradingTracker({
     }
   };
 
+  // Latest state for async callbacks, so a quote refresh never writes back a stale snapshot
+  const positionsRef = useRef(positions);
+  const cashRef = useRef(cashBalance);
+  positionsRef.current = positions;
+  cashRef.current = cashBalance;
+
   // Sync live market quotes for open positions and auto-settle expired contracts
   const refreshLiveQuotes = useCallback(async () => {
-    const openPos = positions.filter((p) => p.status === "OPEN");
+    const openPos = positionsRef.current.filter((p) => p.status === "OPEN");
     if (openPos.length === 0) return;
 
     setLoadingQuotes(true);
     try {
       const itemsPayload = openPos.map((p) => ({
         contract: p.contract,
-        symbol: p.ticker,
+        symbol: isStockPosition(p) ? p.ticker : p.contract,
         ticker: p.ticker,
-        asset_type: "OPTION",
+        asset_type: isStockPosition(p) ? "STOCK" : "OPTION",
         expiration: p.expiration,
         strike: p.strike,
         option_type: p.optionType,
@@ -218,20 +227,22 @@ export default function PaperTradingTracker({
         const json = await res.json();
         const quotes = json.quotes || {};
 
-        const updated = positions.map((p) => {
+        // Re-read state after the await so trades made during the fetch are kept
+        const updated = positionsRef.current.map((p) => {
           if (p.status === "OPEN") {
             const q = quotes[p.contract] || quotes[p.ticker];
             if (q && q.valid) {
               return {
                 ...p,
                 currentPrice: q.current_price,
+                lastUnderlyingSpot: q.underlying_spot || p.lastUnderlyingSpot,
               };
             }
           }
           return p;
         });
 
-        const autoSettle = settleExpiredPositions(updated, cashBalance, quotes);
+        const autoSettle = settleExpiredPositions(updated, cashRef.current, quotes);
         if (autoSettle.settledCount > 0) {
           savePositions(autoSettle.updatedPositions);
           saveBalance(autoSettle.newCashBalance);
@@ -246,18 +257,26 @@ export default function PaperTradingTracker({
     } finally {
       setLoadingQuotes(false);
     }
-  }, [positions, cashBalance]);
+  }, []);
 
+  // Refresh quotes once, as soon as saved positions have loaded
+  const didInitialRefresh = useRef(false);
   useEffect(() => {
-    if (positions.some((p) => p.status === "OPEN")) {
+    if (!didInitialRefresh.current && positions.some((p) => p.status === "OPEN")) {
+      didInitialRefresh.current = true;
       refreshLiveQuotes();
     }
-  }, []);
+  }, [positions, refreshLiveQuotes]);
+
+  // Only the latest chain request may fill the order ticket (a late response could set another ticker's strike/price)
+  const chainRequestId = useRef(0);
 
   // Fetch options chain & live quotes for the current ticker and expiration
   const fetchChainForTicker = useCallback(async (targetTicker: string, targetExp?: string) => {
     const sym = targetTicker.trim().toUpperCase();
     if (!sym) return;
+    const requestId = ++chainRequestId.current;
+    const isCurrent = () => requestId === chainRequestId.current;
 
     setChainLoading(true);
     setQuoteFeedback(null);
@@ -268,6 +287,7 @@ export default function PaperTradingTracker({
       const res = await fetch(url);
       if (res.ok) {
         const data = await res.json();
+        if (!isCurrent()) return;
         setChainData(data);
 
         // Update available expirations
@@ -299,7 +319,7 @@ export default function PaperTradingTracker({
     } catch (err) {
       console.error("Failed to load options chain matrix for paper ticket:", err);
     } finally {
-      setChainLoading(false);
+      if (isCurrent()) setChainLoading(false);
     }
   }, []);
 
@@ -444,7 +464,7 @@ export default function PaperTradingTracker({
     if (!pos || pos.status !== "OPEN") return;
 
     const exitPx = exitPriceOverride !== undefined ? exitPriceOverride : pos.currentPrice;
-    const exitProceeds = exitPx * 100 * pos.contracts;
+    const exitProceeds = positionMarketValue(pos, exitPx);
     const realizedPnl = exitProceeds - pos.totalCost;
 
     const updated = positions.map((p) => {
@@ -481,13 +501,18 @@ export default function PaperTradingTracker({
   const handleExpirePositionNow = (posId: string) => {
     const pos = positions.find((p) => p.id === posId);
     if (!pos) return;
-    const spot = chainData?.current_price || pos.currentPrice || pos.strike;
+    // Use the open chain's spot only if it is for this position's underlying
+    const chainSpot =
+      chainData?.symbol && String(chainData.symbol).toUpperCase() === pos.ticker.toUpperCase()
+        ? chainData.current_price
+        : undefined;
+    const spot = chainSpot || pos.lastUnderlyingSpot;
     const settlement = settleSinglePosition(posId, positions, cashBalance, spot);
     if (settlement.settledCount > 0) {
       savePositions(settlement.updatedPositions);
       saveBalance(settlement.newCashBalance);
-      setExpiryNotice(settlement.summaryMessage);
     }
+    setExpiryNotice(settlement.summaryMessage);
   };
 
   // Reset entire paper account to default
@@ -508,7 +533,7 @@ export default function PaperTradingTracker({
     let unrealizedDollarPnl = 0;
 
     for (const p of openPositions) {
-      const currentVal = p.currentPrice * 100 * p.contracts;
+      const currentVal = positionMarketValue(p, p.currentPrice);
       openPositionsValue += currentVal;
       totalInvestedCost += p.totalCost;
       unrealizedDollarPnl += currentVal - p.totalCost;
@@ -771,7 +796,7 @@ export default function PaperTradingTracker({
           ) : (
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               {openPositions.map((pos) => {
-                const currentVal = pos.currentPrice * 100 * pos.contracts;
+                const currentVal = positionMarketValue(pos, pos.currentPrice);
                 const dollarPnl = currentVal - pos.totalCost;
                 const roiPct = (dollarPnl / pos.totalCost) * 100;
                 const isProfit = dollarPnl >= 0;

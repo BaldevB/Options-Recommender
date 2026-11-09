@@ -22,7 +22,8 @@ export interface PaperTradePosition {
   contract: string;
   assetType?: "STOCK" | "OPTION" | string;
   optionType?: "CALL" | "PUT" | "STOCK" | string;
-  strike?: number;
+  strike?: number; // long strike for vertical spreads
+  shortStrike?: number; // short strike for vertical spreads (caps payout at the spread width)
   expiration?: string; // Format: YYYY-MM-DD
   dte?: number;
   entryPrice: number; // premium per share bought
@@ -42,6 +43,7 @@ export interface PaperTradePosition {
   // Settlement extensions
   settlementType?: "MANUAL" | "EXPIRED_ITM" | "EXPIRED_WORTHLESS";
   underlyingSpotAtExpiry?: number;
+  lastUnderlyingSpot?: number; // last known underlying price from live quotes (used for manual settlement)
 }
 
 export interface SettlementSummary {
@@ -60,6 +62,16 @@ export interface ConsolidatePositionResult {
   totalQty: number;
   weightedPrice: number;
   existingId?: string;
+}
+
+/** True for equity (share) positions, which use a 1x multiplier instead of 100x. */
+export function isStockPosition(p: Partial<PaperTradePosition>): boolean {
+  return p.assetType === "STOCK" || p.optionType === "STOCK" || p.multiplier === 1;
+}
+
+/** Dollar market value of a position at a given per-share/per-contract price. */
+export function positionMarketValue(p: Partial<PaperTradePosition>, price: number): number {
+  return isStockPosition(p) ? price * (p.shares || p.contracts || 0) : price * 100 * (p.contracts || 0);
 }
 
 /**
@@ -142,6 +154,10 @@ export function calculateOptionSettlement(
   } else {
     intrinsic = Math.max(0, spot - strike);
   }
+  // Vertical spreads: payout is capped at the distance between the strikes
+  if (position.shortStrike !== undefined && position.shortStrike !== null && !isNaN(Number(position.shortStrike))) {
+    intrinsic = Math.min(intrinsic, Math.abs(strike - Number(position.shortStrike)));
+  }
 
   intrinsic = Number(intrinsic.toFixed(2));
   const isItm = intrinsic > 0;
@@ -177,7 +193,7 @@ export function settleExpiredPositions(
 
   const updatedPositions = positions.map((p) => {
     // Only open option positions can expire
-    const isStock = p.assetType === "STOCK" || p.optionType === "STOCK" || p.multiplier === 1;
+    const isStock = isStockPosition(p);
     if (p.status !== "OPEN" || isStock) {
       return p;
     }
@@ -190,13 +206,15 @@ export function settleExpiredPositions(
       return p;
     }
 
-    // Determine spot price
-    const spot =
-      quote?.underlying_spot ||
-      (quotes && quotes[p.ticker]?.current_price) ||
-      p.currentPrice ||
-      p.strike ||
-      0;
+    // Determine underlying spot price. Never fall back to the option premium or strike:
+    // without a real underlying price we leave the position open rather than mis-settle it.
+    const spot: number = quote?.underlying_spot || (quotes && quotes[p.ticker]?.current_price) || 0;
+    const isSpread = p.shortStrike !== undefined && p.shortStrike !== null;
+    const hasBackendSettlement =
+      !isSpread && quote?.settlement_price !== undefined && quote?.settlement_price !== null;
+    if (!hasBackendSettlement && !(spot > 0)) {
+      return p;
+    }
 
     // Settlement price from quote if provided, otherwise compute intrinsic
     let settlementPrice = 0;
@@ -204,7 +222,7 @@ export function settleExpiredPositions(
     let payout = 0;
     let realizedPnl = 0;
 
-    if (quote?.settlement_price !== undefined && quote?.settlement_price !== null) {
+    if (hasBackendSettlement) {
       settlementPrice = Number(quote.settlement_price);
       settlementType = (quote.settlement_type as any) || (settlementPrice > 0 ? "EXPIRED_ITM" : "EXPIRED_WORTHLESS");
       payout = Number((settlementPrice * 100 * p.contracts).toFixed(2));
@@ -281,7 +299,7 @@ export function settleSinglePosition(
     };
   }
 
-  const isStock = target.assetType === "STOCK" || target.optionType === "STOCK" || target.multiplier === 1;
+  const isStock = isStockPosition(target);
   if (isStock) {
     // Regular stock close
     const qty = target.shares || target.contracts || 1;
@@ -311,8 +329,19 @@ export function settleSinglePosition(
     };
   }
 
-  // Options Settlement
-  const spot = spotOverride !== undefined && spotOverride > 0 ? spotOverride : target.currentPrice || target.strike || 0;
+  // Options Settlement requires a real underlying spot price (never the option premium)
+  const spot = spotOverride !== undefined && spotOverride > 0 ? spotOverride : 0;
+  if (!(spot > 0)) {
+    return {
+      updatedPositions: positions,
+      newCashBalance: currentCash,
+      settledCount: 0,
+      itmCount: 0,
+      worthlessCount: 0,
+      totalPayout: 0,
+      summaryMessage: `Cannot settle ${target.ticker} ${target.strike} ${target.optionType}: underlying price unavailable. Refresh quotes and try again.`,
+    };
+  }
   const calc = calculateOptionSettlement(target, spot);
   const newCash = Number((currentCash + calc.payout).toFixed(2));
 
@@ -356,7 +385,7 @@ export function settleSinglePosition(
  */
 export function getPositionConsolidationKey(p: Partial<PaperTradePosition>): string {
   const ticker = (p.ticker || "").trim().toUpperCase();
-  const isStock = p.assetType === "STOCK" || p.optionType === "STOCK" || p.multiplier === 1;
+  const isStock = isStockPosition(p);
   if (isStock) {
     return `STOCK:${ticker}`;
   }
@@ -364,6 +393,10 @@ export function getPositionConsolidationKey(p: Partial<PaperTradePosition>): str
   let optType = (p.optionType || "").trim().toUpperCase();
   let strikeNum = p.strike !== undefined ? Number(p.strike) : undefined;
   let exp = (p.expiration || "").trim().slice(0, 10);
+
+  if (p.shortStrike !== undefined && p.shortStrike !== null) {
+    return `SPREAD:${ticker}:${optType}:${Number(p.strike).toFixed(2)}/${Number(p.shortStrike).toFixed(2)}:${exp}`;
+  }
 
   // If missing fields, attempt parsing from contract symbol
   if (p.contract) {
@@ -397,7 +430,7 @@ export function addOrConsolidatePosition(
   existingPositions: PaperTradePosition[],
   newPos: PaperTradePosition
 ): ConsolidatePositionResult {
-  const isStock = newPos.assetType === "STOCK" || newPos.optionType === "STOCK" || newPos.multiplier === 1;
+  const isStock = isStockPosition(newPos);
   const newKey = getPositionConsolidationKey(newPos);
 
   const existingIndex = existingPositions.findIndex(

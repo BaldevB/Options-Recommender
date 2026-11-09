@@ -2,7 +2,9 @@
 
 from datetime import datetime, date, timezone
 import logging
+import threading
 import time
+from datetime import timedelta
 from typing import List, Tuple, Dict, Any, Optional
 import pandas as pd
 import yfinance as yf
@@ -13,22 +15,42 @@ logger = logging.getLogger(__name__)
 _MATRIX_CACHE: Dict[str, Tuple[float, Any]] = {}
 MATRIX_CACHE_TTL = 300.0  # 5 minutes TTL
 MAX_MATRIX_CACHE_ENTRIES = 25
+# FastAPI runs sync endpoints in a threadpool, so cache access must be serialized
+_MATRIX_CACHE_LOCK = threading.Lock()
+
+
+def _today_et() -> date:
+    """Current calendar date in US Eastern Time (options expire on ET dates)."""
+    try:
+        import zoneinfo
+        return datetime.now(zoneinfo.ZoneInfo("America/New_York")).date()
+    except Exception:
+        return (datetime.now(timezone.utc) - timedelta(hours=4)).date()
 
 
 def _prune_expired_matrix_cache() -> None:
-    """Evict expired options matrices to prevent memory buildup on cloud containers."""
+    """Evict expired options matrices to prevent memory buildup on cloud containers. Caller holds the lock."""
     now = time.time()
     expired = [k for k, (ts, _) in _MATRIX_CACHE.items() if (now - ts) > MATRIX_CACHE_TTL]
     for k in expired:
         _MATRIX_CACHE.pop(k, None)
 
 
+def _get_from_matrix_cache(key: str, ttl: float = MATRIX_CACHE_TTL) -> Optional[Any]:
+    with _MATRIX_CACHE_LOCK:
+        entry = _MATRIX_CACHE.get(key)
+    if entry and time.time() - entry[0] < ttl:
+        return entry[1]
+    return None
+
+
 def _store_in_matrix_cache(key: str, data: Any) -> None:
-    _prune_expired_matrix_cache()
-    if len(_MATRIX_CACHE) >= MAX_MATRIX_CACHE_ENTRIES:
-        oldest = min(_MATRIX_CACHE.keys(), key=lambda k: _MATRIX_CACHE[k][0])
-        _MATRIX_CACHE.pop(oldest, None)
-    _MATRIX_CACHE[key] = (time.time(), data)
+    with _MATRIX_CACHE_LOCK:
+        _prune_expired_matrix_cache()
+        if len(_MATRIX_CACHE) >= MAX_MATRIX_CACHE_ENTRIES:
+            oldest = min(_MATRIX_CACHE.keys(), key=lambda k: _MATRIX_CACHE[k][0])
+            _MATRIX_CACHE.pop(oldest, None)
+        _MATRIX_CACHE[key] = (time.time(), data)
 
 
 def get_available_expirations(symbol: str) -> List[str]:
@@ -51,7 +73,7 @@ def calculate_dte(expiration_str: str) -> int:
     """Calculate Days To Expiration (DTE) from an expiration date string."""
     try:
         exp_date = datetime.strptime(expiration_str, "%Y-%m-%d").date()
-        today = date.today()
+        today = _today_et()
         return (exp_date - today).days
     except Exception:
         return -1
@@ -115,7 +137,7 @@ def _clean_chain_df(df: pd.DataFrame, expiration: str, dte: int, option_type: st
     cols = [
         "contractSymbol", "expiration", "dte", "type", "strike",
         "lastPrice", "bid", "ask", "spread", "spread_ratio",
-        "volume", "openInterest", "impliedVolatility", "inTheMoney"
+        "volume", "openInterest", "impliedVolatility", "inTheMoney", "lastTradeDate"
     ]
     existing_cols = [c for c in cols if c in clean.columns]
     return clean[existing_cols]
@@ -230,15 +252,14 @@ def get_options_chain_matrix(
     target_exp = expiration
     if not target_exp or target_exp not in all_expirations:
         candidates = [e for e in exp_list if e["dte"] >= 0]
-        target_exp = candidates[0]["expiration"] if candidates else exp_list[0]["expiration"]
+        target_exp = candidates[0]["expiration"] if candidates else all_expirations[0]
 
     dte = calculate_dte(target_exp)
 
     cache_key = f"{symbol}_{target_exp}"
-    if cache_key in _MATRIX_CACHE:
-        ts, cached_data = _MATRIX_CACHE[cache_key]
-        if time.time() - ts < MATRIX_CACHE_TTL:
-            return cached_data
+    cached_data = _get_from_matrix_cache(cache_key)
+    if cached_data is not None:
+        return cached_data
 
     try:
         ticker = yf.Ticker(symbol)
@@ -346,10 +367,9 @@ def get_volatility_cockpit(symbol: str) -> Dict[str, Any]:
         return {"symbol": symbol, "error": f"Invalid price for {symbol}"}
 
     cache_key = f"vol_cockpit_{symbol}"
-    if cache_key in _MATRIX_CACHE:
-        ts, cached_val = _MATRIX_CACHE[cache_key]
-        if time.time() - ts < 180.0:  # 3 minute cache
-            return cached_val
+    cached_val = _get_from_matrix_cache(cache_key, ttl=180.0)  # 3 minute cache
+    if cached_val is not None:
+        return cached_val
 
     hist = get_price_history(symbol, period="1y")
     if hist is None or len(hist) < 25:
@@ -383,7 +403,7 @@ def get_volatility_cockpit(symbol: str) -> Dict[str, Any]:
                 if not valid_iv.empty:
                     med_val = float(valid_iv.median())
                     d_obj = datetime.strptime(exp, "%Y-%m-%d").date()
-                    dte_days = max(0, (d_obj - date.today()).days)
+                    dte_days = max(0, (d_obj - _today_et()).days)
                     term_structure.append({
                         "expiration": exp,
                         "dte": dte_days,

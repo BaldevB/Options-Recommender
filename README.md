@@ -67,6 +67,15 @@ A high-conviction, risk-managed US stock options suggestion and analytics system
    - **50% Stop-Loss Exit**: Computes practical stop-loss price and exact dollar loss cap.
    - **Defined-Risk Debit Spreads**: Automatically surfaces vertical Bull Call or Bear Put spreads when IV is elevated ($\ge 45\%$).
 
+9. **🎯 Contract Edge Model & Track Record** (`options/edge.py`, `analysis/rec_journal.py`):
+   - **Ranked by expected payoff, not just tradability**: the best liquid candidates are re-scored by a Monte Carlo of the underlying (realized volatility + a modest drift from the signal) that applies the plan's own exits (+50% target, −50% stop, time stop). Final rank = 60% edge, 40% execution quality (`EdgeModelConfig` in `config.py`).
+   - **Consistent PoP and EV**: probability of profit and expected value describe the same managed trade (`pop_method: monte_carlo_exit_rules`).
+   - **Volatility judged per stock**: implied vol is compared with the stock's own realized vol (RICH / FAIR / CHEAP); "elevated IV" for spread suggestions uses this instead of a fixed 45%.
+   - **Earnings vs expiration**: expirations that hold an earnings report are avoided when earlier ones qualify, otherwise flagged.
+   - **Cleaner inputs**: IV re-solved from the bid/ask mid, stale quotes (no trade for 4+ days) dropped, risk-free rate from the 13-week T-bill (`^IRX`), dividend yield in the Greeks, profit targets re-priced with the pricing model.
+   - **Headline sentiment can only lower confidence** (`SignalWeights.sentiment_mode = "dampen_only"`).
+   - **Recommendation journal**: every idea is stored in SQLite (`REC_JOURNAL_PATH`, default `.data/rec_journal.sqlite`) and scored against real option prices every 6h. `GET /api/calibration` reports predicted vs realized win rates, Brier score, and results by signal confidence. On hosts with ephemeral disks, point `REC_JOURNAL_PATH` at persistent storage.
+
 ---
 
 ## 📁 Project Architecture

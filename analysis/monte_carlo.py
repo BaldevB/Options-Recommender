@@ -82,6 +82,7 @@ def run_monte_carlo_simulation(
     # Estimate daily drift and volatility from historical close prices
     daily_drift = 0.0004  # default approx ~10% annual drift
     daily_vol = 0.018    # default approx ~28.5% annual vol
+    drift_is_log_mean = False  # True once drift is estimated from log returns
 
     if df is not None and not df.empty and len(df) >= 15:
         try:
@@ -98,6 +99,7 @@ def run_monte_carlo_simulation(
                     # Dampen extreme sample drift for conservative modeling
                     if not np.isnan(mean_est):
                         daily_drift = float(np.clip(mean_est, -0.003, 0.003))
+                        drift_is_log_mean = True
         except Exception:
             pass
 
@@ -112,7 +114,9 @@ def run_monte_carlo_simulation(
 
     # Geometric Brownian Motion vectorized computation
     # S_t = S_0 * exp(cumsum((drift - 0.5 * sigma^2) + sigma * Z))
-    drift_term = daily_drift - 0.5 * (daily_vol ** 2)
+    # A mean of *log* returns already equals mu - sigma^2/2, so the Ito correction
+    # applies only to the default (arithmetic) drift, never twice.
+    drift_term = daily_drift if drift_is_log_mean else daily_drift - 0.5 * (daily_vol ** 2)
     shocks = rng.normal(loc=0.0, scale=1.0, size=(sim_count, n_days))
     daily_increments = drift_term + (daily_vol * shocks)
     log_cum_paths = np.cumsum(daily_increments, axis=1)

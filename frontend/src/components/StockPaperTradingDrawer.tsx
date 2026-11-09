@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   X,
   Wallet,
@@ -26,6 +26,7 @@ import {
   settleExpiredPositions,
   settleSinglePosition,
   consolidateOpenPositions,
+  isStockPosition,
 } from "../utils/paperSettlement";
 
 export type { PaperTradePosition };
@@ -59,8 +60,10 @@ export default function StockPaperTradingDrawer({
     if (typeof window === "undefined") return;
     try {
       const savedBalance = localStorage.getItem(STORAGE_KEY_BALANCE);
+      const parsedBalance = savedBalance ? parseFloat(savedBalance) : NaN;
+      const startCash = Number.isFinite(parsedBalance) ? parsedBalance : DEFAULT_STARTING_CASH;
       if (savedBalance) {
-        setCashBalance(parseFloat(savedBalance));
+        setCashBalance(startCash);
       } else {
         localStorage.setItem(STORAGE_KEY_BALANCE, DEFAULT_STARTING_CASH.toString());
       }
@@ -75,7 +78,7 @@ export default function StockPaperTradingDrawer({
             localStorage.setItem(STORAGE_KEY_POSITIONS, JSON.stringify(consolidatedPositions));
           }
 
-          let curCash = savedBalance ? parseFloat(savedBalance) : DEFAULT_STARTING_CASH;
+          const curCash = startCash;
           const autoSettle = settleExpiredPositions(activePositions, curCash);
           if (autoSettle.settledCount > 0) {
             setPositions(autoSettle.updatedPositions);
@@ -122,17 +125,23 @@ export default function StockPaperTradingDrawer({
     }
   };
 
+  // Latest state for async callbacks, so a quote refresh never writes back a stale snapshot
+  const positionsRef = useRef(positions);
+  const cashRef = useRef(cashBalance);
+  positionsRef.current = positions;
+  cashRef.current = cashBalance;
+
   // Live Quote Refresh via POST /api/paper-quotes
   const refreshLiveQuotes = useCallback(async () => {
-    const openPos = positions.filter((p) => p.status === "OPEN");
+    const openPos = positionsRef.current.filter((p) => p.status === "OPEN");
     if (openPos.length === 0) return;
 
     setLoadingQuotes(true);
     try {
       const itemsPayload = openPos.map((p) => {
-        const isStock = p.assetType === "STOCK" || p.optionType === "STOCK" || p.multiplier === 1;
+        const isStock = isStockPosition(p);
         return {
-          symbol: p.ticker,
+          symbol: isStock ? p.ticker : p.contract || p.ticker,
           ticker: p.ticker,
           contract: p.contract || p.ticker,
           asset_type: isStock ? "STOCK" : "OPTION",
@@ -152,7 +161,7 @@ export default function StockPaperTradingDrawer({
         const json = await res.json();
         const quotes = json.quotes || {};
 
-        const updated = positions.map((p) => {
+        const updated = positionsRef.current.map((p) => {
           if (p.status === "OPEN") {
             const lookupKey = p.contract || p.ticker;
             const quoteData = quotes[lookupKey] || quotes[p.ticker];
@@ -160,13 +169,14 @@ export default function StockPaperTradingDrawer({
               return {
                 ...p,
                 currentPrice: quoteData.current_price,
+                lastUnderlyingSpot: quoteData.underlying_spot || p.lastUnderlyingSpot,
               };
             }
           }
           return p;
         });
 
-        const autoSettle = settleExpiredPositions(updated, cashBalance, quotes);
+        const autoSettle = settleExpiredPositions(updated, cashRef.current, quotes);
         if (autoSettle.settledCount > 0) {
           savePositions(autoSettle.updatedPositions);
           saveBalance(autoSettle.newCashBalance);
@@ -181,7 +191,7 @@ export default function StockPaperTradingDrawer({
     } finally {
       setLoadingQuotes(false);
     }
-  }, [positions]);
+  }, []);
 
   // Initial quote refresh on open if positions exist
   useEffect(() => {
@@ -207,13 +217,14 @@ export default function StockPaperTradingDrawer({
   const handleExpirePositionNow = (posId: string) => {
     const pos = positions.find((p) => p.id === posId);
     if (!pos) return;
-    const spot = pos.currentPrice || pos.strike || 0;
+    // Stocks close at their own price; options need the underlying's price (never the premium)
+    const spot = isStockPosition(pos) ? pos.currentPrice : pos.lastUnderlyingSpot;
     const settlement = settleSinglePosition(posId, positions, cashBalance, spot);
     if (settlement.settledCount > 0) {
       savePositions(settlement.updatedPositions);
       saveBalance(settlement.newCashBalance);
-      setFeedbackMessage(settlement.summaryMessage);
     }
+    setFeedbackMessage(settlement.summaryMessage);
   };
 
   // Close Position

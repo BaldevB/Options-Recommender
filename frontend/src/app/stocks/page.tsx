@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useMemo, Suspense } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef, Suspense } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useSearchParams, useRouter } from "next/navigation";
@@ -267,8 +267,13 @@ function StockRecommendationsContent() {
     }
   }, []);
 
+  // Request counters: only the latest request may update state (older, slower responses are dropped)
+  const recsRequestId = useRef(0);
+  const deepDiveRequestId = useRef(0);
+
   // Fetch Recommendations
   const fetchRecommendations = useCallback(async () => {
+    const requestId = ++recsRequestId.current;
     setError(null);
     try {
       const params = new URLSearchParams();
@@ -300,17 +305,21 @@ function StockRecommendationsContent() {
         throw new Error(`Server returned HTTP ${res.status}`);
       }
       const data = await res.json();
+      if (requestId !== recsRequestId.current) return;
       if (data && Array.isArray(data.items)) {
         setRecommendations(data.items);
       } else {
         setRecommendations([]);
       }
     } catch (err: any) {
+      if (requestId !== recsRequestId.current) return;
       console.error("Error fetching stock recommendations:", err);
       setError(err.message || "Failed to load stock recommendations");
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (requestId === recsRequestId.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, [activeHorizon, activeStrategy, activePreset, priceBounds, selectedSector, searchQuery, sortBy]);
 
@@ -338,6 +347,8 @@ function StockRecommendationsContent() {
   // Open Deep Dive Modal for a stock
   const openDeepDive = useCallback(
     async (stk: StockRecommendationItem) => {
+      const requestId = ++deepDiveRequestId.current;
+      const isCurrent = () => requestId === deepDiveRequestId.current;
       setDeepDiveStock(stk);
       setDeepDiveTab("overview");
       setDeepDiveLoading(true);
@@ -351,6 +362,7 @@ function StockRecommendationsContent() {
         );
         if (candleRes.ok) {
           const cData = await candleRes.json();
+          if (!isCurrent()) return;
           if (cData && Array.isArray(cData.candles)) {
             setDeepDiveCandles(cData.candles);
           }
@@ -362,12 +374,13 @@ function StockRecommendationsContent() {
         );
         if (deepRes.ok) {
           const aData = await deepRes.json();
+          if (!isCurrent()) return;
           setDeepDiveAnalysis(aData);
         }
       } catch (err) {
         console.error("Error loading deep dive modal data:", err);
       } finally {
-        setDeepDiveLoading(false);
+        if (isCurrent()) setDeepDiveLoading(false);
       }
     },
     []

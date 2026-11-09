@@ -26,6 +26,7 @@ from fastapi import FastAPI, HTTPException, Request
 from analysis.screener_cache import get_screener_cache
 from data.stock_universe import get_stock_universe, STOCK_SECTORS
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 import numpy as np
 import pandas as pd
 
@@ -43,6 +44,8 @@ from analysis.momentum import analyze_momentum
 from analysis.sentiment import analyze_news_sentiment
 from analysis.signals import generate_signal, BiasDirection, ConfidenceTier, TradeSignal
 from options.suggester import suggest_options, build_zero_dte_setup, ZeroDteTradeSetup, calculate_black_scholes_greeks, compute_position_sizing
+from options.edge import build_market_context
+from analysis import rec_journal
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -66,8 +69,23 @@ async def lifespan(app: FastAPI):
             "Running in memory-safe cloud mode (<100MB RAM) using pre-warmed seed cache & on-demand scanning."
         )
 
+    journal_stop = threading.Event()
+    if os.environ.get("REC_JOURNAL_EVAL_ENABLED", "1").lower() in ("1", "true", "yes"):
+        def _journal_loop() -> None:
+            if journal_stop.wait(90):  # let the server warm up first
+                return
+            while not journal_stop.is_set():
+                stats = rec_journal.maybe_evaluate(force=True)
+                if stats:
+                    logger.info("Recommendation journal evaluated: %s", stats)
+                if journal_stop.wait(6 * 3600):
+                    return
+
+        threading.Thread(target=_journal_loop, name="rec-journal-eval", daemon=True).start()
+
     yield
 
+    journal_stop.set()
     if worker_enabled:
         try:
             cache = get_screener_cache()
@@ -161,12 +179,72 @@ def format_trade_plan_dict(tp: Any) -> Optional[Dict[str, Any]]:
             "risk_reward_ratio": getattr(tp, "risk_reward_ratio", 2.0),
             "expected_value": getattr(tp, "expected_value_per_contract", 0.0),
             "expected_value_per_contract": getattr(tp, "expected_value_per_contract", 0.0),
+            "pop_method": getattr(tp, "pop_method", "risk_neutral_expiry"),
+            "prob_target_before_stop_pct": getattr(tp, "prob_target_before_stop_pct", None),
+            "prob_stop_first_pct": getattr(tp, "prob_stop_first_pct", None),
+            "prob_time_exit_pct": getattr(tp, "prob_time_exit_pct", None),
+            "expected_return_pct": getattr(tp, "expected_return_pct", None),
         },
         "playbook_steps": getattr(tp, "playbook_steps", []),
         "ratchet_ladder": getattr(tp, "ratchet_ladder", []),
         "rolling_playbook": getattr(tp, "rolling_playbook", {}),
         "broker_bracket_order": getattr(tp, "broker_bracket_order", {}),
     }
+
+
+def _edge_ctx(symbol: str, spot: float, hist: Any, signal: Any, earnings_info: Optional[Dict[str, Any]] = None):
+    """Market context for the edge model; None (legacy ranking) if anything goes wrong."""
+    try:
+        return build_market_context(symbol, spot, hist, signal, earnings_info, DEFAULT_CONFIG.edge)
+    except Exception as exc:
+        logger.debug("Edge context unavailable for %s: %s", symbol, exc)
+        return None
+
+
+def edge_fields(s: Any) -> Dict[str, Any]:
+    """Edge-model fields for a single-leg suggestion (all optional for older clients)."""
+    tp = getattr(s, "trade_plan", None)
+    pop = getattr(tp, "probability_of_profit_pct", None)
+    return {
+        "edge_score": getattr(s, "edge_score", None),
+        "execution_score": getattr(s, "execution_score", None),
+        "iv_source": getattr(s, "iv_source", "yfinance"),
+        "iv_hv_ratio": getattr(s, "iv_hv_ratio", None),
+        "vol_regime": getattr(s, "vol_regime", "UNKNOWN"),
+        "expected_move_pct": getattr(s, "expected_move_pct", None),
+        "move_coverage_ratio": getattr(s, "move_coverage_ratio", None),
+        "theta_vs_gamma_ratio": getattr(s, "theta_vs_gamma_ratio", None),
+        "spans_earnings": bool(getattr(s, "spans_earnings", False)),
+        "earnings_date": getattr(s, "earnings_date", None),
+        "pop_method": getattr(tp, "pop_method", "risk_neutral_expiry"),
+        "prob_target_before_stop_pct": getattr(tp, "prob_target_before_stop_pct", None),
+        "expected_return_pct": getattr(tp, "expected_return_pct", None),
+        # Realized win rate of past ideas with a similar predicted probability (None until enough history)
+        "calibrated_win_rate_pct": rec_journal.calibrated_win_rate(pop),
+    }
+
+
+def _journal_screening(screening: Any, symbol: str, signal: Any, source: str, top_n: int = 1) -> None:
+    """Record the top suggestion(s) so their outcomes can be scored later. Never raises."""
+    try:
+        bias = getattr(getattr(signal, "bias", None), "value", "")
+        conf = float(getattr(signal, "confidence", 0.0) or 0.0)
+        items = [
+            rec_journal.suggestion_to_journal_item(sug, symbol, bias, conf)
+            for sug in (screening.single_leg_suggestions or [])[:top_n]
+        ]
+        rec_journal.record_recommendations(items, source=source)
+    except Exception as exc:
+        logger.debug("Journal record skipped for %s: %s", symbol, exc)
+
+
+@app.get("/api/calibration")
+def get_calibration_endpoint(evaluate: bool = False):
+    """How accurate have past recommendations been? Optionally scores pending ones first."""
+    eval_stats = rec_journal.maybe_evaluate(force=evaluate)
+    report = rec_journal.calibration_report()
+    report["last_evaluation"] = eval_stats
+    return sanitize_json(report)
 
 
 @app.get("/api/health")
@@ -258,6 +336,8 @@ def get_stock_analysis(
 
     earnings_info = get_earnings_info(ticker, cfg.earnings.blackout_days, cfg.earnings.warning_days)
     momentum = analyze_momentum(hist, ticker, cfg.technicals)
+    if momentum is None:
+        raise HTTPException(status_code=422, detail=f"Not enough price history to analyze {ticker}")
     news_articles = get_company_news(ticker, limit=cfg.news_limit)
     sentiment = analyze_news_sentiment(news_articles, ticker)
     signal = generate_signal(momentum, sentiment, earnings_info, cfg.weights, cfg.earnings)
@@ -266,8 +346,10 @@ def get_stock_analysis(
     calls_df, puts_df, _ = get_options_chains(ticker, cfg.options_filter.min_dte, cfg.options_filter.max_dte)
     screening = suggest_options(
         signal, quote["current_price"], calls_df, puts_df,
-        cfg.options_filter, cfg.risk, cfg.high_risk_filter
+        cfg.options_filter, cfg.risk, cfg.high_risk_filter,
+        market_ctx=_edge_ctx(ticker, quote["current_price"], hist, signal, earnings_info),
     )
+    _journal_screening(screening, ticker, signal, "stock-analysis")
 
     hr = screening.high_risk_setup
     hr_dict = None
@@ -371,6 +453,7 @@ def get_stock_analysis(
                     "rank_score": s.rank_score,
                     "warnings": s.risk_warnings,
                     "trade_plan": format_trade_plan_dict(s.trade_plan),
+                    **edge_fields(s),
                 }
                 for idx, s in enumerate(screening.single_leg_suggestions)
             ],
@@ -402,6 +485,9 @@ def get_stock_analysis(
             "high_risk_setup": hr_dict,
             "elevated_iv": bool(screening.elevated_iv),
             "avg_iv_pct": float(screening.avg_iv_pct),
+            "iv_hv_ratio": screening.iv_hv_ratio,
+            "vol_regime": screening.vol_regime,
+            "realized_vol_pct": screening.realized_vol_pct,
             "audit_log": screening.audit_log,
         }
     }
@@ -472,8 +558,10 @@ def get_high_confidence_picks(
             calls_df, puts_df, _ = get_options_chains(sym, cfg.options_filter.min_dte, cfg.options_filter.max_dte)
             screening = suggest_options(
                 sig, quote["current_price"], calls_df, puts_df,
-                cfg.options_filter, cfg.risk, cfg.high_risk_filter
+                cfg.options_filter, cfg.risk, cfg.high_risk_filter,
+                market_ctx=_edge_ctx(sym, quote["current_price"], hist, sig, e_info),
             )
+            _journal_screening(screening, sym, sig, "high-confidence")
 
             if screening.single_leg_suggestions:
                 best = screening.single_leg_suggestions[0]
@@ -593,7 +681,7 @@ def get_high_risk_setups(
 
             if sig.bias == BiasDirection.NEUTRAL:
                 # Derive directional lean for speculative trade setups
-                sig.bias = BiasDirection.BULLISH if mom.momentum_score >= 50 else BiasDirection.BEARISH
+                sig.bias = BiasDirection.BULLISH if mom.momentum_score >= 0 else BiasDirection.BEARISH
                 if sig.confidence < 0.25:
                     sig.confidence = 0.25
 
@@ -703,7 +791,7 @@ def get_zero_dte_endpoint(
             # Intraday momentum bias (if neutral, lean towards technical momentum)
             bias = sig.bias
             if bias == BiasDirection.NEUTRAL:
-                bias = BiasDirection.BULLISH if mom.momentum_score >= 50 else BiasDirection.BEARISH
+                bias = BiasDirection.BULLISH if mom.momentum_score >= 0 else BiasDirection.BEARISH
 
             opt_type = "CALL" if bias == BiasDirection.BULLISH else "PUT"
 
@@ -900,7 +988,9 @@ def _get_live_options_recommendations(force: bool = False) -> List[Dict[str, Any
                 symbols_to_screen.append((it.get("symbol"), it.get("name", it.get("symbol")), it.get("sector", "general"), it.get("score", 75.0), it.get("action", "BUY")))
             else:
                 symbols_to_screen.append((getattr(it, "symbol", ""), getattr(it, "name", ""), getattr(it, "sector", "general"), getattr(it, "score", 75.0), getattr(it, "action", "BUY")))
-    else:
+        # HOLD / AVOID / EARNINGS BLACKOUT rows must not be turned into directional option trades
+        symbols_to_screen = [row for row in symbols_to_screen if "BUY" in str(row[4]).upper()]
+    if not symbols_to_screen:
         # Benchmark liquid equities
         fallback_tickers = [
             ("NVDA", "NVIDIA Corporation", "technology", 88.0, "STRONG BUY"),
@@ -935,17 +1025,21 @@ def _get_live_options_recommendations(force: bool = False) -> List[Dict[str, Any
                 bias=bias,
                 combined_score=conf if bias == BiasDirection.BULLISH else -conf,
                 confidence=conf,
-                confidence_tier=ConfidenceTier.HIGH if conf >= 0.75 else ConfidenceTier.MODERATE,
+                confidence_tier=ConfidenceTier.HIGH if conf >= 0.75 else ConfidenceTier.MEDIUM,
                 momentum_score=conf * 100.0,
                 sentiment_score=0.20,
                 is_earnings_blackout=False,
                 rationale=[f"Algorithmic technical score: {score:.1f}/100"],
             )
 
+            live_hist = get_price_history(sym, period="6mo")
+            live_earn = get_earnings_info(sym, cfg.earnings.blackout_days, cfg.earnings.warning_days)
             screening = suggest_options(
                 signal, spot, calls_df, puts_df,
-                cfg.options_filter, cfg.risk, cfg.high_risk_filter
+                cfg.options_filter, cfg.risk, cfg.high_risk_filter,
+                market_ctx=_edge_ctx(sym, spot, live_hist, signal, live_earn),
             )
+            _journal_screening(screening, sym, signal, "live-feed")
 
             if screening.single_leg_suggestions:
                 best = screening.single_leg_suggestions[0]
@@ -1013,9 +1107,14 @@ def _get_live_options_recommendations(force: bool = False) -> List[Dict[str, Any
                         f"Delta {best.delta:.2f} matches 0.30–0.55 delta target.",
                         f"Spread {best.spread_pct_of_mid:.1f}% of mid (${best.spread:.2f} wide).",
                         f"Liquidity: {best.open_interest:,} OI with {best.volume:,} volume.",
+                        *([
+                            f"Edge model: {best.trade_plan.prob_target_before_stop_pct:.0f}% chance of +50% before -50% stop, "
+                            f"{best.trade_plan.expected_return_pct:+.1f}% expected on premium; options {best.vol_regime.lower()} vs realized vol."
+                        ] if best.trade_plan and best.trade_plan.prob_target_before_stop_pct is not None else []),
                     ],
                     "vertical_spread": v_spread,
                     "audit_rejections": screening.audit_log,
+                    **edge_fields(best),
                 })
         except Exception as exc:
             logger.debug("Live options screening failed for %s: %s", sym, exc)
@@ -1697,6 +1796,7 @@ def get_options_recommend_for_ticker(
     momentum = None
     sentiment = None
     derived_sig = None
+    hist = None
 
     try:
         hist = get_price_history(sym, period="3mo")
@@ -1755,7 +1855,7 @@ def get_options_recommend_for_ticker(
 
     risk_cfg = RiskManagementConfig(
         account_equity=equity,
-        max_risk_pct=(risk_pct / 100.0 if risk_pct > 0.05 else risk_pct),
+        max_risk_pct=max(risk_pct, 0.0) / 100.0,
         stop_loss_pct=0.50,
     )
     filter_cfg = OptionsFilterConfig(
@@ -1775,7 +1875,12 @@ def get_options_recommend_for_ticker(
         filter_cfg=filter_cfg,
         risk_cfg=risk_cfg,
         high_risk_cfg=high_risk_cfg,
+        market_ctx=_edge_ctx(
+            sym, stock_price, hist, signal,
+            get_earnings_info(sym, DEFAULT_CONFIG.earnings.blackout_days, DEFAULT_CONFIG.earnings.warning_days),
+        ),
     )
+    _journal_screening(screening, sym, signal, "options-recommend")
 
     single_leg = None
     if screening.single_leg_suggestions:
@@ -1820,6 +1925,7 @@ def get_options_recommend_for_ticker(
             "rank_score": s.rank_score,
             "warnings": s.risk_warnings,
             "trade_plan": t_plan,
+            **edge_fields(s),
         }
 
     vertical_spread = None
@@ -1907,6 +2013,9 @@ def get_options_recommend_for_ticker(
         "elevated_iv": bool(screening.elevated_iv),
         "avg_iv_pct": float(screening.avg_iv_pct),
         "audit_log": screening.audit_log,
+        "iv_hv_ratio": screening.iv_hv_ratio,
+        "vol_regime": screening.vol_regime,
+        "realized_vol_pct": screening.realized_vol_pct,
     }
     return sanitize_json(result)
 
@@ -1968,6 +2077,9 @@ def get_options_recommendations_endpoint(
         items.sort(key=lambda x: x["pop_pct"], reverse=True)
     elif s in ("rr_ratio", "risk_reward", "reward"):
         items.sort(key=lambda x: x["risk_reward_ratio"], reverse=True)
+    elif s in ("edge", "expected_return"):
+        # Simulated payoff under the trade plan's exits; ideas without an edge estimate go last
+        items.sort(key=lambda x: (x.get("edge_score") is not None, x.get("edge_score") or 0.0), reverse=True)
     elif s in ("delta",):
         items.sort(key=lambda x: abs(x["delta"]), reverse=True)
     elif s in ("price", "cost", "ask"):
@@ -2152,6 +2264,7 @@ def fetch_paper_quotes(items_to_quote: List[Any]) -> Dict[str, Any]:
                     "expiration": occ_info["expiration"] if occ_info else None,
                     "option_type": occ_info["option_type"] if occ_info else "CALL",
                     "strike": occ_info["strike"] if occ_info else None,
+                    "occ_symbol": sym if occ_info else None,
                 })
         elif isinstance(it, dict):
             sym = (it.get("symbol") or it.get("contract") or it.get("ticker") or "").strip().upper()
@@ -2183,6 +2296,7 @@ def fetch_paper_quotes(items_to_quote: List[Any]) -> Dict[str, Any]:
                 "expiration": exp_val,
                 "option_type": opt_type,
                 "strike": strike_val,
+                "occ_symbol": key if parse_occ_symbol(key) else (sym if parse_occ_symbol(sym) else None),
             })
 
     if not extracted:
@@ -2191,7 +2305,11 @@ def fetch_paper_quotes(items_to_quote: List[Any]) -> Dict[str, Any]:
     results: Dict[str, Any] = {}
     all_syms_set = []
     for it in extracted:
-        if it["symbol"]:
+        if it["asset_type"] == "OPTION":
+            # Options are priced by their OCC symbol, never by the underlying ticker
+            if it["occ_symbol"]:
+                all_syms_set.append(it["occ_symbol"])
+        elif it["symbol"]:
             all_syms_set.append(it["symbol"])
         if it["ticker"]:
             all_syms_set.append(it["ticker"])
@@ -2261,7 +2379,11 @@ def fetch_paper_quotes(items_to_quote: List[Any]) -> Dict[str, Any]:
                     "expiration": exp_date_str,
                 }
             else:
-                px, prev_close = _get_price(sym)
+                if asset_type == "OPTION":
+                    # Unpriceable option (no OCC symbol, e.g. a spread label) -> invalid quote, not the stock price
+                    px, prev_close = _get_price(item["occ_symbol"]) if item["occ_symbol"] else (0.0, 0.0)
+                else:
+                    px, prev_close = _get_price(sym)
                 change = round(px - prev_close, 2) if (px > 0 and prev_close > 0) else 0.0
                 change_pct = round((change / prev_close) * 100.0, 2) if prev_close > 0 else 0.0
                 results[key] = {
@@ -2327,7 +2449,7 @@ async def post_paper_quotes_endpoint(request: Request):
     except Exception:
         pass
 
-    quotes = fetch_paper_quotes(items)
+    quotes = await run_in_threadpool(fetch_paper_quotes, items[:60])
     return sanitize_json(quotes)
 
 
@@ -2433,7 +2555,7 @@ async def post_stocks_refresh_endpoint(
         pass
 
     cache = get_screener_cache()
-    res = cache.refresh_cache(force=req_force, tickers=req_tickers)
+    res = await run_in_threadpool(cache.refresh_cache, force=req_force, tickers=req_tickers)
     return sanitize_json(res)
 
 
@@ -2465,7 +2587,7 @@ def get_stocks_monte_carlo_endpoint(
         if hist is not None and not hist.empty:
             cur_price = float(hist["Close"].iloc[-1])
         else:
-            cur_price = 100.0
+            raise HTTPException(status_code=404, detail=f"No price data available for {target_symbol}")
 
     hist_data = get_price_history(target_symbol, period="6mo")
 

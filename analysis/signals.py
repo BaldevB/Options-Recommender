@@ -62,8 +62,10 @@ def generate_signal(
     mom_score = momentum.momentum_score
     sent_score = sentiment.overall_score if sentiment and sentiment.article_count > 0 else 0.0
 
-    # Adjust weights dynamically if sentiment has no data
-    if sentiment is None or sentiment.article_count == 0:
+    # Adjust weights dynamically if sentiment has no data.
+    # In "dampen_only" mode (default) a handful of VADER-scored headlines is treated as weak evidence:
+    # direction and strength come from momentum, and sentiment can only reduce confidence (below).
+    if sentiment is None or sentiment.article_count == 0 or getattr(weights, "sentiment_mode", "blend") == "dampen_only":
         eff_mom_weight = 1.0
         eff_sent_weight = 0.0
     else:
